@@ -61,11 +61,26 @@ python scripts/demo.py --image path/to/aerial.tif
 | `temporal.py` | Match trees across time, compute diff | Detect new trees, export |
 | `export.py` | Write GeoJSON/Shapefile/CSV | Process, detect, score |
 
+## File References
+- See PRD.md for what we're building, who it's for, success criteria
+- See ARCHITECTURE.md for pipeline diagram, module contracts, ADRs
+- See TECH_STACK.md for exact versions and dataset sources
+- See IMPLEMENTATION_PLAN.md for phased task breakdown
+- Check progress.txt for current state before starting any work
+
 ## Non-Negotiables
 - `autoresearch/eval.py` is LOCKED — never modify during harness runs
 - Never commit data/ or outputs/ directories
 - Never hardcode file paths — use relative paths or CLI args
 - All dataset downloads go through scripts/download_data.py
+- Module contracts in ARCHITECTURE.md are the source of truth for function signatures
+
+## Known Gotchas
+- DeepForest's `predict_image()` returns a pandas DataFrame, not sv.Detections — must convert
+- OAM-TCD on HuggingFace uses Parquet + TIFF — needs `datasets` library, not raw download
+- ICGC orthophotos are large GeoTIFFs (2-4 GB per tile) — must tile before inference
+- piexif cannot read GeoTIFF CRS — use rasterio or pyproj for orthophoto georeferencing
+- Apple MPS (M-series) may not support all torch ops — test with CPU fallback
 
 ## Current Focus
 See progress.txt for state.

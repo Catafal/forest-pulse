@@ -18,16 +18,25 @@ Detect individual trees, assess their health from RGB imagery alone, and track c
 ## Quick Start
 
 ```bash
-pip install forest-pulse
+# Install from source (PyPI release coming in Phase 6)
+git clone https://github.com/jordicatafal/forest-pulse.git
+cd forest-pulse
+pip install -e .
 ```
 
 ```python
+import numpy as np
+from PIL import Image
+
 from forest_pulse.detect import detect_trees
 from forest_pulse.health import score_health
 from forest_pulse.visualize import annotate_trees
 
+# Load aerial image
+image = np.array(Image.open("aerial_image.tif"))
+
 # Detect trees in aerial imagery
-detections = detect_trees("aerial_image.tif")
+detections = detect_trees(image)
 
 # Score health of each detected tree
 health = score_health(image, detections)
@@ -36,9 +45,8 @@ health = score_health(image, detections)
 annotated = annotate_trees(image, detections, health)
 ```
 
-Or try it in Google Colab:
-
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/jordicatafal/forest-pulse/blob/main/notebooks/01_quickstart.ipynb)
+<!-- Colab notebook coming in Phase 1 -->
+<!-- [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/jordicatafal/forest-pulse/blob/main/notebooks/01_quickstart.ipynb) -->
 
 ## No Drone Needed
 

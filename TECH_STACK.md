@@ -1,6 +1,9 @@
 # Tech Stack — Forest Pulse
 
-All versions are pinned. No "latest".
+Versions use minimum-compatible ranges (`>=`), not exact pins.
+This is an intentional deviation from the SOP ("exact versions, no latest") because
+Forest Pulse is a library consumed by others — pinning exact versions would cause
+dependency conflicts for users. For reproducible development, use `pip freeze > requirements-lock.txt`.
 
 ## Core Runtime
 
