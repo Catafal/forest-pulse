@@ -50,13 +50,24 @@ CHECKPOINT_DIR = "checkpoints/"
 
 def train():
     """Run training with current configuration. Saves checkpoint on completion."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+    from forest_pulse.device import get_device, supports_amp
+
+    device = get_device()
+    use_amp = supports_amp(device)
+
+    print(f"Device: {device} | AMP: {use_amp}")
+
     # TODO: Implement training pipeline (Phase 2)
     # 1. Load dataset from TRAIN_DATA in COCO format
     # 2. Apply augmentations
-    # 3. Initialize model with BACKBONE
+    # 3. Initialize model with BACKBONE on `device`
     # 4. Set optimizer with LEARNING_RATE and LR_SCHEDULER
-    # 5. Train for FINE_TUNE_EPOCHS (or until wall-clock budget expires)
-    # 6. Save checkpoint to CHECKPOINT_DIR/current.pt
+    # 5. If use_amp: wrap forward pass with torch.autocast("cuda")
+    #    If MPS/CPU: train in float32 (no AMP)
+    # 6. Train for FINE_TUNE_EPOCHS (or until wall-clock budget expires)
+    # 7. Save checkpoint to CHECKPOINT_DIR/current.pt
     raise NotImplementedError(
         "Training not yet implemented. "
         "Requires: rfdetr package + downloaded OAM-TCD dataset."
@@ -64,6 +75,8 @@ def train():
 
 
 if __name__ == "__main__":
+    from pathlib import Path
+
     print(f"Config: backbone={BACKBONE} lr={LEARNING_RATE} img={IMAGE_SIZE} "
           f"bs={BATCH_SIZE} freeze={FREEZE_BACKBONE} epochs={FINE_TUNE_EPOCHS}")
     print(f"Augmentations: {AUGMENTATIONS}")

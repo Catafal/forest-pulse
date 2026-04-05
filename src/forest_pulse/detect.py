@@ -93,7 +93,12 @@ def _load_deepforest():
     if "deepforest" in _MODEL_CACHE:
         return _MODEL_CACHE["deepforest"]
 
+    from forest_pulse.device import get_device
+
     logger.info("Loading DeepForest pretrained model (first call — downloads weights)...")
+    # Log device for traceability — DeepForest (PyTorch Lightning) handles
+    # its own device placement, so we don't call model.to(device) here.
+    get_device()
     model = df_main.deepforest()
     model.load_model(model_name="weecology/deepforest-tree", revision="main")
     _MODEL_CACHE["deepforest"] = model
