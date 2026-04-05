@@ -1,16 +1,17 @@
 """Tree crown detection from aerial RGB imagery.
 
-Wraps detection models (DeepForest for bootstrap, RF-DETR for production)
-and returns Supervision Detections objects for downstream processing.
-
-Phase 1: DeepForest pretrained (RetinaNet backbone).
-Phase 2: Swap to fine-tuned RF-DETR (DINOv2 backbone) via auto-research harness.
+Wraps detection models and returns Supervision Detections for downstream processing.
+Supports:
+  - DeepForest pretrained (RetinaNet backbone) — quick demo, American forests
+  - RF-DETR pretrained (DINOv2 backbone) — SOTA, no fine-tuning
+  - RF-DETR from checkpoint — fine-tuned on your own data (the goal)
 """
 
 from __future__ import annotations
 
 import logging
 import time
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -19,8 +20,8 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-# Lazy model cache — avoids reloading 170MB weights on every call.
-# Keyed by model_name so multiple models can coexist if needed.
+# Lazy model cache — avoids reloading weights on every call.
+# Keyed by model_name so multiple models can coexist.
 _MODEL_CACHE: dict = {}
 
 
@@ -33,20 +34,18 @@ def detect_trees(
 
     Args:
         image: RGB image as numpy array (H, W, 3) or path to image file.
-        model_name: Detection model to use. Options:
-            - "deepforest": Pre-trained DeepForest RetinaNet (Phase 1 default).
-            - Path to a local RF-DETR checkpoint (Phase 2+).
+        model_name: Detection model to use:
+            - "deepforest": Pre-trained DeepForest RetinaNet.
+            - "rfdetr-base", "rfdetr-large": Pre-trained RF-DETR (no fine-tuning).
+            - Path to .pt/.pth file: Fine-tuned RF-DETR checkpoint.
         confidence: Minimum detection confidence threshold (0.0 - 1.0).
 
     Returns:
         sv.Detections with xyxy bounding boxes and confidence scores.
         Returns sv.Detections.empty() if no trees found.
-
-    Raises:
-        FileNotFoundError: If image path does not exist.
-        ValueError: If model_name is not supported.
     """
-    # Load image from path if needed
+    # Load image from path if needed, keep original path for RF-DETR
+    image_path = None
     if isinstance(image, (str, Path)):
         image_path = Path(image)
         if not image_path.exists():
@@ -54,74 +53,131 @@ def detect_trees(
         image = np.array(Image.open(image_path).convert("RGB"))
         logger.info("Loaded image from %s — shape: %s", image_path, image.shape)
 
-    if model_name != "deepforest":
+    start = time.perf_counter()
+
+    if model_name == "deepforest":
+        detections = _predict_deepforest(image, confidence)
+
+    elif model_name.startswith("rfdetr"):
+        detections = _predict_rfdetr_pretrained(image, model_name, confidence)
+
+    elif Path(model_name).suffix in (".pt", ".pth"):
+        detections = _predict_rfdetr_checkpoint(image, model_name, confidence)
+
+    else:
         raise ValueError(
-            f"Model '{model_name}' not supported yet. "
-            "Phase 1 only supports 'deepforest'. RF-DETR comes in Phase 2."
+            f"Unknown model '{model_name}'. Options: 'deepforest', 'rfdetr-base', "
+            "'rfdetr-large', or path to a .pt/.pth checkpoint."
         )
 
-    model = _load_deepforest()
-
-    # DeepForest expects RGB numpy array, warns about uint8→float32 (expected behavior)
-    import warnings
-    start = time.perf_counter()
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message="Image type is uint8")
-        warnings.filterwarnings("ignore", message="An image was passed directly")
-        raw_predictions = model.predict_image(image=image)
     elapsed = time.perf_counter() - start
-    logger.info("Inference completed in %.2fs", elapsed)
-
-    # DeepForest returns None when no trees detected
-    if raw_predictions is None or len(raw_predictions) == 0:
-        logger.warning("No trees detected in image")
-        return sv.Detections.empty()
-
-    detections = _to_supervision_detections(raw_predictions, confidence)
-    logger.info("Detected %d trees (confidence >= %.2f)", len(detections), confidence)
+    logger.info(
+        "Detected %d trees in %.2fs (confidence >= %.2f)",
+        len(detections), elapsed, confidence,
+    )
     return detections
 
 
-def _load_deepforest():
-    """Load DeepForest pretrained model, cached after first call.
+# --- DeepForest path (Phase 1) ---
 
-    Returns the cached model on subsequent calls to avoid re-downloading
-    the 170MB weights from HuggingFace.
-    """
+def _predict_deepforest(image: np.ndarray, confidence: float) -> sv.Detections:
+    """Run detection using DeepForest pretrained model."""
+    model = _load_deepforest()
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="Image type is uint8")
+        warnings.filterwarnings("ignore", message="An image was passed directly")
+        raw = model.predict_image(image=image)
+
+    if raw is None or len(raw) == 0:
+        logger.warning("DeepForest: no trees detected")
+        return sv.Detections.empty()
+
+    # Convert DataFrame → sv.Detections, filter by confidence
+    df = raw[raw["score"] >= confidence]
+    if len(df) == 0:
+        return sv.Detections.empty()
+
+    return sv.Detections(
+        xyxy=df[["xmin", "ymin", "xmax", "ymax"]].values.astype(np.float32),
+        confidence=df["score"].values.astype(np.float32),
+    )
+
+
+def _load_deepforest():
+    """Load DeepForest pretrained model, cached after first call."""
     from deepforest import main as df_main
 
     if "deepforest" in _MODEL_CACHE:
         return _MODEL_CACHE["deepforest"]
 
     from forest_pulse.device import get_device
+    get_device()  # log device for traceability
 
-    logger.info("Loading DeepForest pretrained model (first call — downloads weights)...")
-    # Log device for traceability — DeepForest (PyTorch Lightning) handles
-    # its own device placement, so we don't call model.to(device) here.
-    get_device()
+    logger.info("Loading DeepForest model (first call — downloads weights)...")
     model = df_main.deepforest()
     model.load_model(model_name="weecology/deepforest-tree", revision="main")
     _MODEL_CACHE["deepforest"] = model
-    logger.info("DeepForest model loaded and cached")
+    logger.info("DeepForest loaded and cached")
     return model
 
 
-def _to_supervision_detections(
-    df,
-    confidence_threshold: float,
+# --- RF-DETR paths (Phase 2) ---
+
+def _predict_rfdetr_pretrained(
+    image: np.ndarray, variant: str, confidence: float,
 ) -> sv.Detections:
-    """Convert DeepForest DataFrame output to Supervision Detections.
+    """Run detection using a pretrained RF-DETR model (no fine-tuning)."""
+    model = _load_rfdetr_pretrained(variant)
+    # RF-DETR predict() accepts PIL Image or numpy array, returns sv.Detections
+    detections = model.predict(image=Image.fromarray(image), threshold=confidence)
+    return detections if len(detections) > 0 else sv.Detections.empty()
 
-    DeepForest's predict_image() returns a pandas DataFrame with columns:
-    xmin, ymin, xmax, ymax, label, score. We extract xyxy + score and
-    filter by confidence threshold.
-    """
-    # Filter by confidence before conversion
-    df = df[df["score"] >= confidence_threshold]
-    if len(df) == 0:
-        return sv.Detections.empty()
 
-    xyxy = df[["xmin", "ymin", "xmax", "ymax"]].values.astype(np.float32)
-    confidence = df["score"].values.astype(np.float32)
+def _predict_rfdetr_checkpoint(
+    image: np.ndarray, checkpoint_path: str, confidence: float,
+) -> sv.Detections:
+    """Run detection using a fine-tuned RF-DETR checkpoint."""
+    model = _load_rfdetr_checkpoint(checkpoint_path)
+    detections = model.predict(image=Image.fromarray(image), threshold=confidence)
+    return detections if len(detections) > 0 else sv.Detections.empty()
 
-    return sv.Detections(xyxy=xyxy, confidence=confidence)
+
+def _load_rfdetr_pretrained(variant: str):
+    """Load pretrained RF-DETR by variant name, cached."""
+    if variant in _MODEL_CACHE:
+        return _MODEL_CACHE[variant]
+
+    import rfdetr
+
+    _VARIANT_MAP = {
+        "rfdetr-base": rfdetr.RFDETRBase,
+        "rfdetr-large": rfdetr.RFDETRLarge,
+    }
+    cls = _VARIANT_MAP.get(variant)
+    if cls is None:
+        raise ValueError(f"Unknown RF-DETR variant '{variant}'. Options: {list(_VARIANT_MAP)}")
+
+    logger.info("Loading RF-DETR %s pretrained model...", variant)
+    model = cls()
+    _MODEL_CACHE[variant] = model
+    logger.info("RF-DETR %s loaded and cached", variant)
+    return model
+
+
+def _load_rfdetr_checkpoint(checkpoint_path: str):
+    """Load fine-tuned RF-DETR from checkpoint, cached by path."""
+    if checkpoint_path in _MODEL_CACHE:
+        return _MODEL_CACHE[checkpoint_path]
+
+    import rfdetr
+
+    path = Path(checkpoint_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {path}")
+
+    logger.info("Loading RF-DETR from checkpoint: %s", path)
+    model = rfdetr.RFDETRBase.from_checkpoint(str(path))
+    _MODEL_CACHE[checkpoint_path] = model
+    logger.info("RF-DETR checkpoint loaded and cached")
+    return model

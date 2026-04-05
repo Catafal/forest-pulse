@@ -32,7 +32,7 @@ dependencies = [
 
 [project.optional-dependencies]
 train = [
-    "rfdetr>=1.0.0",
+    "rfdetr>=1.6.2",
     "datasets>=2.18.0",
     "albumentations>=1.4.0",
 ]

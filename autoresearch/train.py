@@ -1,84 +1,117 @@
-"""EDITABLE training configuration — the agent modifies this file.
+"""EDITABLE training configuration — the auto-research agent modifies this file.
 
 This is the search surface for the auto-research harness. The agent
 experiments by changing the configuration values below, then running
 the training loop to see if mAP50 improves.
 
 Configuration dimensions the agent can explore:
-- Model backbone (rfdetr-nano, rfdetr-base, rfdetr-large)
+- Model backbone (rfdetr-base, rfdetr-large)
 - Learning rate (1e-3 to 1e-6)
-- Image size (400, 512, 640, 800, 1024)
-- Batch size (2, 4, 8)
-- Augmentations (flip, rotate, mosaic, color jitter, cutout)
-- Freeze backbone (True/False)
+- Image size (400, 512, 640, 800) — set by model variant, not a direct param
+- Batch size (1, 2, 4, 8)
 - Fine-tune epochs (5, 10, 20, 50)
-- Learning rate scheduler (cosine, step, constant)
-- Warmup epochs (0, 1, 2, 5)
 """
 
 from __future__ import annotations
+
+import logging
+import shutil
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # ============================================================
 # CONFIGURATION — Agent edits these values
 # ============================================================
 
-BACKBONE = "rfdetr-base"          # rfdetr-nano | rfdetr-base | rfdetr-large
+BACKBONE = "rfdetr-base"          # rfdetr-base | rfdetr-large
 LEARNING_RATE = 1e-4              # float, typically 1e-3 to 1e-6
-IMAGE_SIZE = 640                  # int, must be divisible by 32
-BATCH_SIZE = 4                    # int, limited by GPU memory
-FREEZE_BACKBONE = False           # True = only train detection head
-FINE_TUNE_EPOCHS = 20             # int, capped by wall-clock budget
-AUGMENTATIONS = [
-    "horizontal_flip",
-    "random_rotate_90",
-]
-LR_SCHEDULER = "cosine"           # cosine | step | constant
-WARMUP_EPOCHS = 2                 # int, 0 = no warmup
+BATCH_SIZE = 2                    # int, keep low for MPS (2-4)
+FINE_TUNE_EPOCHS = 1              # int, set to 1 for smoke test
 
 # ============================================================
-# DATA PATHS — Do not change (fixed by eval.py contract)
+# FIXED PATHS — Do not change (eval.py depends on these)
 # ============================================================
 
-TRAIN_DATA = "data/oam_tcd/train/"
-VAL_DATA = "data/oam_tcd/val/"
-CHECKPOINT_DIR = "checkpoints/"
+DATASET_DIR = str(Path(__file__).parent.parent / "data" / "rfdetr")
+CHECKPOINT_DIR = str(Path(__file__).parent.parent / "checkpoints")
+
+# Maps config string → rfdetr class name
+_BACKBONE_MAP = {
+    "rfdetr-base": "RFDETRBase",
+    "rfdetr-large": "RFDETRLarge",
+}
 
 # ============================================================
-# TRAINING LOOP — Agent can edit logic below if needed
+# TRAINING
 # ============================================================
 
 
 def train():
-    """Run training with current configuration. Saves checkpoint on completion."""
-    import sys
-    sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-    from forest_pulse.device import get_device, supports_amp
+    """Run RF-DETR fine-tuning with current config.
 
-    device = get_device()
-    use_amp = supports_amp(device)
+    Uses the rfdetr library's built-in training loop which handles:
+    - Data loading from COCO format
+    - Augmentations (built-in)
+    - Device placement (auto CUDA/MPS/CPU)
+    - Checkpoint saving (best + last)
 
-    print(f"Device: {device} | AMP: {use_amp}")
+    The agent only needs to tweak the config values above.
+    """
+    import rfdetr
 
-    # TODO: Implement training pipeline (Phase 2)
-    # 1. Load dataset from TRAIN_DATA in COCO format
-    # 2. Apply augmentations
-    # 3. Initialize model with BACKBONE on `device`
-    # 4. Set optimizer with LEARNING_RATE and LR_SCHEDULER
-    # 5. If use_amp: wrap forward pass with torch.autocast("cuda")
-    #    If MPS/CPU: train in float32 (no AMP)
-    # 6. Train for FINE_TUNE_EPOCHS (or until wall-clock budget expires)
-    # 7. Save checkpoint to CHECKPOINT_DIR/current.pt
-    raise NotImplementedError(
-        "Training not yet implemented. "
-        "Requires: rfdetr package + downloaded OAM-TCD dataset."
+    # Validate dataset exists
+    dataset_path = Path(DATASET_DIR)
+    if not (dataset_path / "train" / "_annotations.coco.json").exists():
+        raise FileNotFoundError(
+            f"Training data not found at {DATASET_DIR}. "
+            "Run: python scripts/prepare_rfdetr_dataset.py"
+        )
+
+    # Resolve model class from backbone config
+    model_cls_name = _BACKBONE_MAP.get(BACKBONE)
+    if model_cls_name is None:
+        raise ValueError(f"Unknown backbone '{BACKBONE}'. Options: {list(_BACKBONE_MAP)}")
+
+    model_cls = getattr(rfdetr, model_cls_name)
+    model = model_cls()
+
+    # Auto-compute gradient accumulation to approximate effective batch of 16.
+    # Smaller BATCH_SIZE (needed for MPS memory) compensated by more accumulation steps.
+    grad_accum = max(1, 16 // BATCH_SIZE)
+
+    checkpoint_path = Path(CHECKPOINT_DIR)
+    checkpoint_path.mkdir(parents=True, exist_ok=True)
+
+    logger.info(
+        "Training %s | lr=%s | bs=%d | grad_accum=%d | epochs=%d",
+        BACKBONE, LEARNING_RATE, BATCH_SIZE, grad_accum, FINE_TUNE_EPOCHS,
     )
+
+    model.train(
+        dataset_dir=DATASET_DIR,
+        epochs=FINE_TUNE_EPOCHS,
+        batch_size=BATCH_SIZE,
+        grad_accum_steps=grad_accum,
+        lr=LEARNING_RATE,
+        output_dir=CHECKPOINT_DIR,
+    )
+
+    # Copy best checkpoint to current.pt — the filename eval.py expects
+    best = checkpoint_path / "checkpoint_best_total.pth"
+    current = checkpoint_path / "current.pt"
+    if best.exists():
+        shutil.copy2(best, current)
+        logger.info("Best checkpoint saved as: %s", current)
+    else:
+        logger.warning("No best checkpoint found at %s", best)
 
 
 if __name__ == "__main__":
-    from pathlib import Path
+    logging.basicConfig(level=logging.INFO, format="%(name)s | %(levelname)s | %(message)s")
 
-    print(f"Config: backbone={BACKBONE} lr={LEARNING_RATE} img={IMAGE_SIZE} "
-          f"bs={BATCH_SIZE} freeze={FREEZE_BACKBONE} epochs={FINE_TUNE_EPOCHS}")
-    print(f"Augmentations: {AUGMENTATIONS}")
-    print(f"Scheduler: {LR_SCHEDULER}, warmup: {WARMUP_EPOCHS}")
+    print(f"Config: backbone={BACKBONE} lr={LEARNING_RATE} "
+          f"bs={BATCH_SIZE} epochs={FINE_TUNE_EPOCHS}")
+    print(f"Dataset: {DATASET_DIR}")
+    print(f"Output:  {CHECKPOINT_DIR}")
     train()

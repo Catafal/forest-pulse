@@ -36,7 +36,9 @@ outputs/*
 # Auto-research experiment log (survives git resets, must stay untracked)
 autoresearch/results.tsv
 autoresearch/run.log
-autoresearch/checkpoints/
+
+# Trained model checkpoints (large, not committed)
+checkpoints/
 
 # Jupyter
 .ipynb_checkpoints/
@@ -50,3 +52,7 @@ Thumbs.db
 .env
 *.key
 credentials.*
+
+# Downloaded model weights (large, re-downloaded on first run)
+*.pth
+rf-detr-*.pth
