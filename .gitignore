@@ -21,9 +21,13 @@ env/
 *.swo
 *~
 
-# Data (large files — never commit)
+# Data (large files — never commit full datasets)
+# Exception: data/sample/ is small and committed for replicability
 data/*
 !data/.gitkeep
+!data/sample/
+!data/sample/*
+!data/sample/**/*
 
 # Outputs (generated results — never commit)
 outputs/*
