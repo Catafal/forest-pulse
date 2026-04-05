@@ -1,18 +1,37 @@
 ## Current State
 
-Phase: 1 (MVP Detection + Visualization)
-Status: IMPLEMENTED — core modules written, pending verification
-Next: Install deps, download sample image, run demo, verify output
+Phase: 2.5 (Data Pivot — Catalan Forests Only)
+Status: PIPELINE COMPLETE, DATA PIVOT IN PROGRESS
+Next: Pick Catalan forest area → download ICGC tile → annotate → retrain
 
 ## Completed
 - [x] Repo initialized with Agentic Engineering SOP structure
 - [x] CLAUDE.md, PRD.md, TECH_STACK.md, ARCHITECTURE.md written
 - [x] SOP audit — all docs aligned with contracts
-- [x] detect.py — DeepForest wrapper + DataFrame→sv.Detections conversion
+- [x] detect.py — DeepForest + RF-DETR (pretrained + checkpoint) inference
 - [x] health.py — GRVI + ExG scoring + heuristic classifier
 - [x] visualize.py — Supervision annotators with health color palette
 - [x] demo.py — CLI pipeline: detect → health → visualize → save
-- [x] download_data.py — sample image download
+- [x] device.py — cross-platform CUDA / MPS / CPU detection
+- [x] RF-DETR fine-tuning pipeline (train.py) — verified on MPS
+- [x] Evaluation pipeline (eval.py) — mAP50 metric, LOCKED
+- [x] Full pipeline smoke test: train → checkpoint → detect → health → visualize
+- [x] DATA PIVOT: decided to use ONLY Catalan forest imagery (ICGC), drop global OAM-TCD
+
+## Data to Delete (user action)
+- data/sample/oam_tcd/ (committed — git rm)
+- data/rfdetr/ (local symlinks — rm -rf)
+- checkpoints/ (model trained on wrong data — rm -rf)
+- rf-detr-base.pth (355MB weights, will re-download — rm)
+
+## Next Steps (ordered)
+1. Pick a forest area in Catalunya (municipality or GPS coords)
+2. Download ICGC orthophoto tile(s) — https://www.icgc.cat/en/Citizens/Download/Aerial-and-satellite-images
+3. Write tiling script: split large GeoTIFF → 640x640 patches
+4. Bootstrap annotations: run DeepForest on patches → weak labels
+5. Manual correction in Roboflow (free) → export COCO format
+6. Train RF-DETR on Catalan data
+7. Run auto-research harness to optimize
 
 ## Blockers
-None. Ready to verify.
+- BLOCKER: Need to pick a specific Catalan forest area (municipality or GPS coords)
