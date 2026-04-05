@@ -1,37 +1,28 @@
 ## Current State
 
-Phase: 2.5 (Data Pivot — Catalan Forests Only)
-Status: PIPELINE COMPLETE, DATA PIVOT IN PROGRESS
-Next: Pick Catalan forest area → download ICGC tile → annotate → retrain
+Phase: 2 COMPLETE — RF-DETR trained on Montseny data
+Status: FIRST MODEL TRAINED — 41.5% mAP50 on Catalan forests
+Next: More epochs / annotation correction / auto-research harness to improve
 
 ## Completed
 - [x] Repo initialized with Agentic Engineering SOP structure
-- [x] CLAUDE.md, PRD.md, TECH_STACK.md, ARCHITECTURE.md written
 - [x] SOP audit — all docs aligned with contracts
-- [x] detect.py — DeepForest + RF-DETR (pretrained + checkpoint) inference
-- [x] health.py — GRVI + ExG scoring + heuristic classifier
-- [x] visualize.py — Supervision annotators with health color palette
-- [x] demo.py — CLI pipeline: detect → health → visualize → save
+- [x] Phase 1: detect.py + health.py + visualize.py + demo.py (DeepForest)
 - [x] device.py — cross-platform CUDA / MPS / CPU detection
-- [x] RF-DETR fine-tuning pipeline (train.py) — verified on MPS
-- [x] Evaluation pipeline (eval.py) — mAP50 metric, LOCKED
-- [x] Full pipeline smoke test: train → checkpoint → detect → health → visualize
-- [x] DATA PIVOT: decided to use ONLY Catalan forest imagery (ICGC), drop global OAM-TCD
+- [x] RF-DETR fine-tuning pipeline (train.py + eval.py)
+- [x] DATA PIVOT: Catalan forests only (ICGC Montseny orthophotos)
+- [x] download_montseny.py — ICGC WMS client for 3 elevation zones
+- [x] tile_orthophoto.py — GeoTIFF → 640x640 patches (300 patches, 72MB)
+- [x] bootstrap_annotations.py — DeepForest weak labels (10,376 trees)
+- [x] RF-DETR trained 10 epochs on Montseny weak labels
+  - mAP50: 0.415 | Precision: 0.438 | Recall: 0.512 | F1: 0.472
+  - 80 trees detected on test patch (vs DeepForest's 45)
 
-## Data to Delete (user action)
-- data/sample/oam_tcd/ (committed — git rm)
-- data/rfdetr/ (local symlinks — rm -rf)
-- checkpoints/ (model trained on wrong data — rm -rf)
-- rf-detr-base.pth (355MB weights, will re-download — rm)
-
-## Next Steps (ordered)
-1. Pick a forest area in Catalunya (municipality or GPS coords)
-2. Download ICGC orthophoto tile(s) — https://www.icgc.cat/en/Citizens/Download/Aerial-and-satellite-images
-3. Write tiling script: split large GeoTIFF → 640x640 patches
-4. Bootstrap annotations: run DeepForest on patches → weak labels
-5. Manual correction in Roboflow (free) → export COCO format
-6. Train RF-DETR on Catalan data
-7. Run auto-research harness to optimize
+## Improvement Options (not started)
+- [ ] More training epochs (20-50) — model was still improving at epoch 10
+- [ ] Annotation correction in Roboflow — clean up weak labels, retrain
+- [ ] Auto-research harness — optimize LR, backbone, batch size overnight
+- [ ] More data — download more ICGC zones beyond the 3 current ones
 
 ## Blockers
-- BLOCKER: Need to pick a specific Catalan forest area (municipality or GPS coords)
+None. Model works. Decision point: improve further or move to Phase 3 (temporal).
