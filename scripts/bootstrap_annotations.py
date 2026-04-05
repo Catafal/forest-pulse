@@ -2,14 +2,18 @@
 
 Runs DeepForest on all patches in data/montseny/patches/, generates
 weak bounding box labels in COCO format. These are "weak labels" —
-~60% precision on Catalan forests (model was trained on American forests).
+the model was trained on American forests so precision on Catalan
+forests is limited, but it's 5-10x faster than annotating from scratch.
+
+Uses predict_tile() with sliding windows (patch_size=400, overlap=0.25)
+because DeepForest was trained on 400x400 NEON tiles at 10cm — our
+640x640 patches at 25cm need the windowing to match expected scale.
 
 Output is meant to be manually corrected in Roboflow before training.
 
 Usage:
     python scripts/bootstrap_annotations.py
-    python scripts/bootstrap_annotations.py --confidence 0.3
-    python scripts/bootstrap_annotations.py --output data/montseny/annotations_raw.json
+    python scripts/bootstrap_annotations.py --confidence 0.1
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ import argparse
 import json
 import logging
 import time
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -26,8 +31,13 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 PATCH_DIR = Path(__file__).parent.parent / "data" / "montseny" / "patches"
-DEFAULT_OUTPUT = Path(__file__).parent.parent / "data" / "montseny" / "annotations_raw.json"
-DEFAULT_CONFIDENCE = 0.3
+DEFAULT_OUTPUT = (
+    Path(__file__).parent.parent / "data" / "montseny" / "annotations_raw.json"
+)
+
+# Lower default confidence because DeepForest is uncertain on non-American forests.
+# predict_tile with NMS will handle duplicate removal.
+DEFAULT_CONFIDENCE = 0.1
 
 
 def bootstrap_annotations(
@@ -37,6 +47,9 @@ def bootstrap_annotations(
 ) -> dict:
     """Run DeepForest on all patches and export COCO annotations.
 
+    Uses predict_tile() with sliding windows for better detection on
+    640x640 patches (DeepForest was trained on 400x400 tiles).
+
     Args:
         patch_dir: Directory containing .jpg patches.
         output_path: Where to save the COCO JSON.
@@ -45,8 +58,7 @@ def bootstrap_annotations(
     Returns:
         COCO annotation dict.
     """
-    # Lazy import — DeepForest pulls in torch + torchvision (~3s)
-    from forest_pulse.detect import detect_trees
+    from deepforest import main as df_main
 
     patches = sorted(patch_dir.glob("*.jpg"))
     if not patches:
@@ -54,13 +66,19 @@ def bootstrap_annotations(
         logger.error("Run: python scripts/tile_orthophoto.py")
         return {}
 
+    # Load model once
+    logger.info("Loading DeepForest model...")
+    model = df_main.deepforest()
+    model.load_model(model_name="weecology/deepforest-tree", revision="main")
     logger.info("Bootstrapping annotations for %d patches...", len(patches))
 
     # COCO format structure
     coco = {
         "images": [],
         "annotations": [],
-        "categories": [{"id": 0, "name": "tree", "supercategory": "vegetation"}],
+        "categories": [
+            {"id": 0, "name": "tree", "supercategory": "vegetation"}
+        ],
     }
 
     annotation_id = 0
@@ -79,19 +97,29 @@ def bootstrap_annotations(
             "height": h,
         })
 
-        # Run detection with DeepForest
-        detections = detect_trees(image, model_name="deepforest", confidence=confidence)
+        # predict_tile does sliding window + NMS internally.
+        # patch_size=400 matches DeepForest's training resolution.
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore")
+            result = model.predict_tile(
+                image=image,
+                patch_size=400,
+                patch_overlap=0.25,
+            )
 
-        if len(detections) == 0:
+        if result is None or len(result) == 0:
             continue
 
-        # Convert sv.Detections → COCO annotations
-        for xyxy in detections.xyxy:
-            x1, y1, x2, y2 = xyxy.tolist()
+        # Filter by confidence
+        result = result[result["score"] >= confidence]
+        if len(result) == 0:
+            continue
 
-            # COCO bbox format: [x, y, width, height]
-            bbox_w = x2 - x1
-            bbox_h = y2 - y1
+        # Convert DataFrame → COCO annotations
+        for _, row in result.iterrows():
+            x1, y1 = row["xmin"], row["ymin"]
+            bbox_w = row["xmax"] - x1
+            bbox_h = row["ymax"] - y1
 
             # Skip tiny detections (likely noise)
             if bbox_w < 5 or bbox_h < 5:
@@ -101,19 +129,24 @@ def bootstrap_annotations(
                 "id": annotation_id,
                 "image_id": img_id,
                 "category_id": 0,
-                "bbox": [round(x1, 1), round(y1, 1),
-                         round(bbox_w, 1), round(bbox_h, 1)],
-                "area": round(bbox_w * bbox_h, 1),
+                "bbox": [
+                    round(float(x1), 1), round(float(y1), 1),
+                    round(float(bbox_w), 1), round(float(bbox_h), 1),
+                ],
+                "area": round(float(bbox_w * bbox_h), 1),
                 "iscrowd": 0,
             })
             annotation_id += 1
 
-        total_trees += len(detections)
+        patch_trees = len(result)
+        total_trees += patch_trees
 
         # Progress logging every 50 images
         if (img_id + 1) % 50 == 0:
-            logger.info("  Processed %d/%d patches (%d trees so far)",
-                        img_id + 1, len(patches), total_trees)
+            logger.info(
+                "  Processed %d/%d patches (%d trees so far)",
+                img_id + 1, len(patches), total_trees,
+            )
 
     elapsed = time.perf_counter() - start
 
@@ -123,8 +156,10 @@ def bootstrap_annotations(
         json.dump(coco, f, indent=2)
 
     logger.info("Done in %.1fs", elapsed)
-    logger.info("Images: %d | Annotations: %d trees",
-                len(coco["images"]), len(coco["annotations"]))
+    logger.info(
+        "Images: %d | Annotations: %d trees",
+        len(coco["images"]), len(coco["annotations"]),
+    )
     logger.info("Saved: %s", output_path)
 
     return coco
@@ -141,7 +176,7 @@ def main():
     )
     parser.add_argument(
         "--confidence", type=float, default=DEFAULT_CONFIDENCE,
-        help="Min detection confidence (default: 0.3).",
+        help="Min detection confidence (default: 0.1).",
     )
     parser.add_argument(
         "--output", type=Path, default=DEFAULT_OUTPUT,
@@ -165,9 +200,8 @@ def main():
         print(f"  Tree labels: {n_annots} ({avg:.1f} per patch)")
         print(f"  Output:      {args.output}")
         print(f"{'='*50}")
-        print("\n  IMPORTANT: These are WEAK labels (~60% precision).")
-        print("  Next step: Upload to Roboflow, correct manually,")
-        print("  then export corrected COCO JSON.")
+        print("\n  These are WEAK labels — correct in Roboflow,")
+        print("  then export corrected COCO JSON for training.")
 
 
 if __name__ == "__main__":

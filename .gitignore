@@ -22,9 +22,13 @@ env/
 *~
 
 # Data (large files — never commit full datasets)
+# Exception: Montseny patches + annotations ARE committed for replicability
 data/*
 !data/.gitkeep
-!data/montseny/patches/          # 640x640 forest patches ARE committed
+!data/montseny/
+data/montseny/raw/               # raw ICGC GeoTIFFs (1.3GB, git-ignored)
+data/montseny/boundary.geojson   # not yet created
+!data/montseny/patches/
 !data/montseny/patches/**
 !data/montseny/patches_metadata.csv
 !data/montseny/annotations_raw.json
