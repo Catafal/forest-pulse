@@ -58,9 +58,9 @@ def evaluate(model_path: str = "checkpoints/current.pt") -> float:
     for annot in coco["annotations"]:
         annots_by_image[annot["image_id"]].append(annot)
 
-    # Load model from checkpoint
+    # Load model from checkpoint via pretrain_weights kwarg
     logger.info("Loading checkpoint: %s", checkpoint)
-    model = rfdetr.RFDETRBase.from_checkpoint(str(checkpoint))
+    model = rfdetr.RFDETRBase(pretrain_weights=str(checkpoint))
 
     # Collect predictions and ground truths for each image
     all_predictions = []
@@ -70,7 +70,7 @@ def evaluate(model_path: str = "checkpoints/current.pt") -> float:
         img_path = str(VAL_DIR / img_info["file_name"])
 
         # Predict with very low confidence to capture full precision-recall curve
-        preds = model.predict(image=img_path, threshold=0.01)
+        preds = model.predict(images=img_path, threshold=0.01)
 
         # Ensure class_id is set (single-class: all trees = 0)
         if preds.class_id is None:

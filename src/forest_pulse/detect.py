@@ -130,7 +130,7 @@ def _predict_rfdetr_pretrained(
     """Run detection using a pretrained RF-DETR model (no fine-tuning)."""
     model = _load_rfdetr_pretrained(variant)
     # RF-DETR predict() accepts PIL Image or numpy array, returns sv.Detections
-    detections = model.predict(image=Image.fromarray(image), threshold=confidence)
+    detections = model.predict(images=Image.fromarray(image), threshold=confidence)
     return detections if len(detections) > 0 else sv.Detections.empty()
 
 
@@ -139,7 +139,7 @@ def _predict_rfdetr_checkpoint(
 ) -> sv.Detections:
     """Run detection using a fine-tuned RF-DETR checkpoint."""
     model = _load_rfdetr_checkpoint(checkpoint_path)
-    detections = model.predict(image=Image.fromarray(image), threshold=confidence)
+    detections = model.predict(images=Image.fromarray(image), threshold=confidence)
     return detections if len(detections) > 0 else sv.Detections.empty()
 
 
@@ -166,7 +166,11 @@ def _load_rfdetr_pretrained(variant: str):
 
 
 def _load_rfdetr_checkpoint(checkpoint_path: str):
-    """Load fine-tuned RF-DETR from checkpoint, cached by path."""
+    """Load fine-tuned RF-DETR from checkpoint, cached by path.
+
+    RF-DETR loads custom weights via the pretrain_weights kwarg at init,
+    not a separate from_checkpoint method.
+    """
     if checkpoint_path in _MODEL_CACHE:
         return _MODEL_CACHE[checkpoint_path]
 
@@ -177,7 +181,7 @@ def _load_rfdetr_checkpoint(checkpoint_path: str):
         raise FileNotFoundError(f"Checkpoint not found: {path}")
 
     logger.info("Loading RF-DETR from checkpoint: %s", path)
-    model = rfdetr.RFDETRBase.from_checkpoint(str(path))
+    model = rfdetr.RFDETRBase(pretrain_weights=str(path))
     _MODEL_CACHE[checkpoint_path] = model
     logger.info("RF-DETR checkpoint loaded and cached")
     return model

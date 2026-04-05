@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 BACKBONE = "rfdetr-base"          # rfdetr-base | rfdetr-large
 LEARNING_RATE = 1e-4              # float, typically 1e-3 to 1e-6
 BATCH_SIZE = 2                    # int, keep low for MPS (2-4)
-FINE_TUNE_EPOCHS = 1              # int, set to 1 for smoke test
+FINE_TUNE_EPOCHS = 5              # int, minimum for non-zero metrics
 
 # ============================================================
 # FIXED PATHS — Do not change (eval.py depends on these)
