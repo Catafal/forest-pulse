@@ -9,9 +9,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import geopandas as gpd
-import numpy as np
-import supervision as sv
+import geopandas as gpd  # noqa: F401 — used in function signatures (stub)
+import supervision as sv  # noqa: F401 — used in function signatures (stub)
 
 from forest_pulse.health import HealthScore
 

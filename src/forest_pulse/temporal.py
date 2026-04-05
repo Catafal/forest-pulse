@@ -69,7 +69,8 @@ def compare_periods(
 
     Uses nearest-neighbor matching within a GPS tolerance radius.
     Trees in t₀ without a match in t₁ are classified as "missing" (possible death/removal).
-    Trees in t₁ without a match in t₀ are classified as "new" (possible growth/detection improvement).
+    Trees in t₁ without a match in t₀ are classified as "new"
+    (possible growth/detection improvement).
 
     Args:
         gdf_before: GeoDataFrame of trees at time t₀.

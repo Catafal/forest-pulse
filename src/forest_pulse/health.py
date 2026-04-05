@@ -3,14 +3,35 @@
 Computes vegetation indices (GRVI, ExG) from cropped tree crown bounding boxes
 to classify each tree as healthy, stressed, or dead — using only RGB imagery,
 no multispectral or NIR required.
+
+Phase 1: Heuristic thresholds (tunable constants below).
+Phase 3: Replace with trained MobileNetV3 classifier on Swedish Forest Damages.
 """
 
 from __future__ import annotations
 
+import logging
+from collections import Counter
 from dataclasses import dataclass
 
 import numpy as np
 import supervision as sv
+
+logger = logging.getLogger(__name__)
+
+# --- Tunable thresholds for heuristic classification ---
+# GRVI (Green-Red Vegetation Index): range [-1, 1].
+# Healthy vegetation reflects more green than red → GRVI > 0.
+GRVI_HEALTHY_THRESHOLD = 0.10   # above this = likely healthy
+GRVI_DEAD_THRESHOLD = 0.0      # below this = likely dead/bare
+
+# ExG (Excess Green Index): range approx [-255, 510].
+# Higher values = more green vegetation. Secondary confirmation signal.
+EXG_HEALTHY_THRESHOLD = 30.0   # above this + GRVI healthy = confident healthy
+EXG_DEAD_THRESHOLD = 10.0      # below this = likely dead/bare
+
+# Minimum crop size for reliable index computation (pixels)
+MIN_CROP_SIZE = 4
 
 
 @dataclass
@@ -20,7 +41,7 @@ class HealthScore:
     tree_id: int
     grvi: float          # Green-Red Vegetation Index: (G-R)/(G+R), range [-1, 1]
     exg: float           # Excess Green Index: 2G - R - B, range [-255, 510]
-    label: str           # "healthy" | "stressed" | "dead"
+    label: str           # "healthy" | "stressed" | "dead" | "unknown"
     confidence: float    # 0.0 - 1.0
 
 
@@ -39,23 +60,65 @@ def score_health(
 
     Returns:
         List of HealthScore, one per detected tree, in same order as detections.
+        Empty list if no detections.
     """
-    # TODO: Implement health scoring pipeline
-    # 1. Crop each bbox from image
-    # 2. Compute GRVI and ExG per crop
-    # 3. Classify using thresholds (Phase 1) or trained classifier (Phase 3)
-    raise NotImplementedError("score_health not yet implemented")
+    if len(detections) == 0:
+        logger.info("No detections to score — returning empty health list")
+        return []
+
+    scores = []
+    for i, xyxy in enumerate(detections.xyxy):
+        crop = _crop_detection(image, xyxy)
+
+        # Skip crops that are too small for reliable index computation
+        if crop.shape[0] < MIN_CROP_SIZE or crop.shape[1] < MIN_CROP_SIZE:
+            logger.debug("Tree %d: crop too small (%s), marking unknown", i, crop.shape[:2])
+            scores.append(HealthScore(
+                tree_id=i, grvi=0.0, exg=0.0, label="unknown", confidence=0.0,
+            ))
+            continue
+
+        grvi = compute_grvi(crop)
+        exg = compute_exg(crop)
+        label, conf = classify_health(grvi, exg)
+        scores.append(HealthScore(tree_id=i, grvi=grvi, exg=exg, label=label, confidence=conf))
+
+    # Log health distribution for traceability
+    distribution = Counter(s.label for s in scores)
+    logger.info(
+        "Health scored %d trees: %s",
+        len(scores),
+        ", ".join(f"{k}={v}" for k, v in sorted(distribution.items())),
+    )
+    return scores
 
 
 def compute_grvi(crop: np.ndarray) -> float:
     """Green-Red Vegetation Index: (G - R) / (G + R).
 
-    Healthy vegetation has high green relative to red (GRVI > 0.2).
-    Stressed vegetation shows lower GRVI (0.05 - 0.2).
+    Healthy vegetation has high green relative to red (GRVI > 0.1).
+    Stressed vegetation shows lower GRVI (0.0 - 0.1).
     Dead/bare has negative or near-zero GRVI.
+
+    Args:
+        crop: RGB image crop as numpy array (H, W, 3), uint8.
+
+    Returns:
+        GRVI value, range [-1.0, 1.0]. Returns 0.0 for black/empty crops.
     """
-    # TODO: Implement GRVI computation
-    raise NotImplementedError
+    # Float64 to avoid uint8 overflow in subtraction
+    r = crop[:, :, 0].astype(np.float64)
+    g = crop[:, :, 1].astype(np.float64)
+
+    mean_g = g.mean()
+    mean_r = r.mean()
+    denominator = mean_g + mean_r
+
+    # Guard against division by zero (pure black crop)
+    if denominator < 1e-6:
+        return 0.0
+
+    return float((mean_g - mean_r) / denominator)
 
 
 def compute_exg(crop: np.ndarray) -> float:
@@ -63,19 +126,61 @@ def compute_exg(crop: np.ndarray) -> float:
 
     Higher values indicate more vegetation. Useful as a secondary signal
     alongside GRVI to reduce false positives on non-vegetation green objects.
+
+    Args:
+        crop: RGB image crop as numpy array (H, W, 3), uint8.
+
+    Returns:
+        Mean ExG value across all pixels.
     """
-    # TODO: Implement ExG computation
-    raise NotImplementedError
+    r = crop[:, :, 0].astype(np.float64)
+    g = crop[:, :, 1].astype(np.float64)
+    b = crop[:, :, 2].astype(np.float64)
+
+    return float(np.mean(2.0 * g - r - b))
 
 
 def classify_health(grvi: float, exg: float) -> tuple[str, float]:
     """Classify tree health from vegetation indices.
 
-    Returns (label, confidence) where label is one of:
-    "healthy", "stressed", "dead".
+    Uses heuristic thresholds (Phase 1). Both GRVI and ExG must agree
+    for high confidence. Disagreement lowers confidence.
 
-    Phase 1: Heuristic thresholds (tunable).
-    Phase 3: Replace with trained MobileNetV3 classifier.
+    Phase 3 replaces this with a trained MobileNetV3 classifier.
+
+    Args:
+        grvi: Green-Red Vegetation Index value.
+        exg: Excess Green Index value.
+
+    Returns:
+        Tuple of (label, confidence) where label is one of:
+        "healthy", "stressed", "dead".
     """
-    # TODO: Implement classification logic
-    raise NotImplementedError
+    # Both indices indicate healthy vegetation
+    if grvi > GRVI_HEALTHY_THRESHOLD and exg > EXG_HEALTHY_THRESHOLD:
+        return ("healthy", 0.8)
+
+    # Either index indicates dead/bare — flag it
+    if grvi < GRVI_DEAD_THRESHOLD or exg < EXG_DEAD_THRESHOLD:
+        return ("dead", 0.7)
+
+    # Middle ground — indices disagree or are borderline
+    return ("stressed", 0.5)
+
+
+def _crop_detection(image: np.ndarray, xyxy: np.ndarray) -> np.ndarray:
+    """Extract a bounding box crop from the image, clamped to image bounds.
+
+    Args:
+        image: Full image (H, W, 3).
+        xyxy: Bounding box as [x1, y1, x2, y2].
+
+    Returns:
+        Cropped region as numpy array.
+    """
+    h, w = image.shape[:2]
+    x1 = max(0, int(xyxy[0]))
+    y1 = max(0, int(xyxy[1]))
+    x2 = min(w, int(xyxy[2]))
+    y2 = min(h, int(xyxy[3]))
+    return image[y1:y2, x1:x2]

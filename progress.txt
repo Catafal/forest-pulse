@@ -1,14 +1,18 @@
 ## Current State
 
 Phase: 1 (MVP Detection + Visualization)
-Status: SCAFFOLDING — repo initialized, docs written, module stubs created
-Next: Implement detect.py with DeepForest pretrained model
+Status: IMPLEMENTED — core modules written, pending verification
+Next: Install deps, download sample image, run demo, verify output
 
 ## Completed
 - [x] Repo initialized with Agentic Engineering SOP structure
 - [x] CLAUDE.md, PRD.md, TECH_STACK.md, ARCHITECTURE.md written
-- [x] Module stubs created for all 6 core modules
-- [x] Auto-research harness files created
+- [x] SOP audit — all docs aligned with contracts
+- [x] detect.py — DeepForest wrapper + DataFrame→sv.Detections conversion
+- [x] health.py — GRVI + ExG scoring + heuristic classifier
+- [x] visualize.py — Supervision annotators with health color palette
+- [x] demo.py — CLI pipeline: detect → health → visualize → save
+- [x] download_data.py — sample image download
 
 ## Blockers
-None. All questions resolved. Ready to implement.
+None. Ready to verify.
