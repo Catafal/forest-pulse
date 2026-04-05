@@ -22,12 +22,12 @@ env/
 *~
 
 # Data (large files — never commit full datasets)
-# Exception: data/sample/ is small and committed for replicability
 data/*
 !data/.gitkeep
-!data/sample/
-!data/sample/*
-!data/sample/**/*
+!data/montseny/patches/          # 640x640 forest patches ARE committed
+!data/montseny/patches/**
+!data/montseny/patches_metadata.csv
+!data/montseny/annotations_raw.json
 
 # Outputs (generated results — never commit)
 outputs/*
