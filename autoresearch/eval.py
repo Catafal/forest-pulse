@@ -76,6 +76,11 @@ def evaluate(model_path: str = "checkpoints/current.pt") -> float:
         if preds.class_id is None:
             preds.class_id = np.zeros(len(preds), dtype=int)
 
+        # Strip extra metadata that supervision metrics can't handle
+        # (rfdetr adds source_shape as tuple, which breaks iteration)
+        if hasattr(preds, "data") and "source_shape" in preds.data:
+            del preds.data["source_shape"]
+
         all_predictions.append(preds)
 
         # Build ground truth sv.Detections from COCO annotations
