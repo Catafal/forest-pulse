@@ -66,6 +66,47 @@ ZONES = {
         "x_max": 454000,
         "y_max": 4628000,
     },
+    # --- 5 additional zones for geographic diversity ---
+    "ne_slopes": {
+        "name": "NE slopes — Beech/oak transition (Sant Marçal, 900-1200m)",
+        # Different aspect than existing mid zone, NE-facing humid slopes
+        "x_min": 454000,
+        "y_min": 4628000,
+        "x_max": 457000,
+        "y_max": 4631000,
+    },
+    "sw_valley": {
+        "name": "SW valley — Dry holm oak (Tagamanent area, 400-700m)",
+        # Drier microclimate than low zone, south-facing slopes
+        "x_min": 443000,
+        "y_min": 4621000,
+        "x_max": 446000,
+        "y_max": 4624000,
+    },
+    "se_ridge": {
+        "name": "SE ridge — Cork oak + pine (above Sant Celoni, 600-900m)",
+        # Different species mix: cork oak (Quercus suber) + maritime pine
+        "x_min": 456000,
+        "y_min": 4620000,
+        "x_max": 459000,
+        "y_max": 4623000,
+    },
+    "nw_plateau": {
+        "name": "NW plateau — Mixed deciduous (Espinelves area, 700-1000m)",
+        # Atlantic influence: higher rainfall, denser undergrowth
+        "x_min": 445000,
+        "y_min": 4630000,
+        "x_max": 448000,
+        "y_max": 4633000,
+    },
+    "summit": {
+        "name": "Summit ridge — Subalpine (Matagalls area, 1400-1700m)",
+        # Sparse canopy + meadow patches, tests model on edge cases
+        "x_min": 448000,
+        "y_min": 4625000,
+        "x_max": 451000,
+        "y_max": 4628000,
+    },
 }
 
 

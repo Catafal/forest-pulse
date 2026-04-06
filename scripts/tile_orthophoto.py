@@ -38,7 +38,7 @@ DEFAULT_PATCH_PX = 640
 DEFAULT_EXG_THRESHOLD = 15.0
 
 # Target: ~100 patches per zone, 3 zones = 300 total
-DEFAULT_MAX_PATCHES = 300
+DEFAULT_MAX_PATCHES = 800
 
 
 def compute_exg(patch: np.ndarray) -> float:

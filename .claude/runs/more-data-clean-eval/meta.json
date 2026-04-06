@@ -1,0 +1,18 @@
+{
+  "slug": "more-data-clean-eval",
+  "created": "2026-04-06T19:30:00Z",
+  "current_phase": "act",
+  "spec_confirmed": "2026-04-06T19:35:00Z",
+  "plan_confirmed": "2026-04-06T19:45:00Z",
+  "plan_iterations": 1,
+  "conditional_skills": [],
+  "pr_number": null,
+  "pr_status": null,
+  "phases_completed": [
+    "describe",
+    "observe",
+    "analyze"
+  ],
+  "skills_invoked": [],
+  "errors": []
+}
