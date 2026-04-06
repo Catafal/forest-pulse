@@ -172,11 +172,13 @@ def self_train(
         print(f"  ROUND {round_num}/{rounds}")
         print(f"{'='*60}")
 
-        # Backup current checkpoint before this round's training overwrites it
-        backup_path = CHECKPOINT_DIR / f"round_{round_num - 1}.pt"
-        if CURRENT_CHECKPOINT.exists() and round_num > 1:
+        # Backup checkpoint before training overwrites it.
+        # Round 1 saves the original pre-self-training model as round_0.pt.
+        backup_name = f"round_{round_num - 1}.pt"
+        backup_path = CHECKPOINT_DIR / backup_name
+        if CURRENT_CHECKPOINT.exists() and not backup_path.exists():
             shutil.copy2(CURRENT_CHECKPOINT, backup_path)
-            logger.info("Backed up checkpoint → %s", backup_path.name)
+            logger.info("Backed up checkpoint → %s", backup_name)
 
         # Step 1: Relabel patches with current model at high confidence
         round_annots_path = MONTSENY_DIR / f"annotations_round_{round_num}.json"
@@ -264,8 +266,8 @@ def main():
         help="Number of self-training rounds (default: 3).",
     )
     parser.add_argument(
-        "--confidence", type=float, default=0.7,
-        help="Min confidence for relabeling (default: 0.7).",
+        "--confidence", type=float, default=0.5,
+        help="Min confidence for relabeling (default: 0.5).",
     )
     parser.add_argument(
         "--epochs", type=int, default=10,
