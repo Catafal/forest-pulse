@@ -1,36 +1,56 @@
-"""Post-detector tree classifier — multi-modal binary tree-vs-not-tree.
+"""Post-detector tree classifier — RGB-distilled LiDAR knowledge.
 
-Takes any RF-DETR detection plus its multi-modal context (RGB color
-statistics + GRVI/ExG vegetation indices + LiDAR 3D features) and
-returns a probability that the detection is a real tree (not a bush,
-rock, or false positive).
+Takes any RF-DETR detection plus its 2D context (bbox geometry +
+GRVI/ExG vegetation indices + RGB color statistics from the bbox crop)
+and returns a probability that the detection is a real tree rather
+than a false positive.
 
-Trained on **auto-labels derived from LiDAR**:
-  - LiDAR `height_p95_m >= 5 m` → label = 1 (tree)
-  - LiDAR `height_p95_m <= 2 m` → label = 0 (bush / not-tree)
-  - 2 m < height < 5 m → ambiguous, excluded from training
+## Labeling strategy — tree-top matching (Phase 9.5)
 
-Zero human annotation needed.
+Training labels come from MATCHING detections to LiDAR tree-tops
+found via local-max filtering on a Canopy Height Model:
 
-## Architecture rationale
+  - bbox center within 2.0 m of a LiDAR tree-top (height >= 5 m) → 1
+  - bbox center more than 4.0 m from any eligible tree-top          → 0
+  - 2.0 m < distance <= 4.0 m                                       → None
 
-This is a TWO-STAGE pipeline. RF-DETR's job is "find pixel regions
-that look like tree crowns" (a 2D visual pattern matcher). The
-classifier's job is "given this candidate region and all the data we
-can attach to it, is it actually a real tree?" (a multi-modal decision).
+The 2.0 m positive threshold matches the Phase 8 eval matching
+tolerance EXACTLY — train on the metric you evaluate. The 4.0 m
+negative threshold is generous because `find_tree_tops_from_chm`
+uses a 3 m min_distance, so legitimate merged-crown partners can
+live within 3 m of each other.
 
-Mixing the two in one model is an anti-pattern: every classification
-improvement would require a 20-minute detector retrain. With the
-two-stage design, the classifier iterates in seconds (sklearn
-GradientBoostingClassifier on ~500 examples) while the detector stays
-frozen.
+## Why RGB-only (no LiDAR features in the vector)
+
+The critical insight from Phase 9: if labels come from LiDAR AND
+features come from LiDAR, the classifier is a tautological
+"LiDAR-in, LiDAR-out" filter. A 10-line deterministic function
+(`lidar_tree_top_filter`) does the same thing with zero learning.
+
+The VALUE of a learning-based classifier is distillation: train
+the model to predict "would LiDAR say this is a tree?" from
+RGB/bbox/health features ALONE, so the classifier carries LiDAR
+knowledge into settings where LiDAR is not available (drone
+imagery, non-Catalunya regions, future deployments).
+
+That's why the feature vector here has NO `lidar_*` entries. The
+18-feature Phase 9 schema was collapsed to 11 features deliberately.
+
+## Class imbalance
+
+With tree-top-match labels, the class split flips: most RF-DETR
+detections are false positives, so class 0 dominates. We use
+`sample_weight = compute_sample_weight('balanced', y_train)` in
+the sklearn `.fit()` call to prevent the classifier from trivially
+predicting "FP always". GradientBoostingClassifier does not accept
+`class_weight=` directly, but sample_weight is equivalent.
 
 ## Why scikit-learn
 
-`GradientBoostingClassifier` is the right tool for ~500 labeled examples
-on 18 tabular features. Marginal accuracy gain from XGBoost / LightGBM
-isn't worth the additional dependency at this scale. sklearn is small,
-already required for nothing else, and clearly supported on macOS arm64.
+`GradientBoostingClassifier` is the right tool for a few hundred
+labeled examples on 11 tabular features. sklearn is small, already
+installed via the `[classifier]` extra, works on macOS arm64, and
+has no runtime GPU requirement.
 """
 
 from __future__ import annotations
@@ -43,7 +63,7 @@ from typing import Any
 import numpy as np
 
 from forest_pulse.health import HealthScore
-from forest_pulse.lidar import LiDARFeatures
+from forest_pulse.lidar import bbox_centers_to_world
 
 logger = logging.getLogger(__name__)
 
@@ -51,18 +71,27 @@ logger = logging.getLogger(__name__)
 # Constants — fixed by the SPEC, documented inline
 # ============================================================
 
-# LiDAR auto-labeling thresholds. These match Phase 7 conventions
-# (Spanish Forest Inventory: trees > 5 m, shrubs < 2 m).
-TREE_HEIGHT_THRESHOLD_M = 5.0
-BUSH_HEIGHT_THRESHOLD_M = 2.0
+# Labeling thresholds for auto_label_from_tree_top_match.
+# D_pos must equal the Phase 8 eval match tolerance (2 m) so training
+# and evaluation optimize the same objective. D_neg is > 3 m because
+# find_tree_tops uses min_distance_m=3, so two legitimate tree-tops
+# can sit 3 m apart — detections in the 3-4 m zone could be valid
+# matches to a merged-crown partner the local-max filter collapsed.
+DEFAULT_POSITIVE_TOL_M = 2.0
+DEFAULT_NEGATIVE_TOL_M = 4.0
+
+# Minimum LiDAR peak height to count a tree-top as eligible. Spanish
+# Forest Inventory tree cutoff. Consistent with Phase 7/8.
+DEFAULT_MIN_TOP_HEIGHT_M = 5.0
 
 # Default cutoff for converting probability → binary tree decision.
 # Tunable later if precision/recall trade-off needs adjusting.
 DEFAULT_PROB_THRESHOLD = 0.5
 
-# Canonical feature order. The trained model stores feature importances
-# in this order, and `_features_to_vector` enforces it. Changing this
-# list invalidates any saved model — bump model schema version if so.
+# Canonical feature order — 11 features, NO lidar_*. The trained model
+# stores feature importances in this order, and `_features_to_vector`
+# enforces it. Changing this list invalidates any saved model — bump
+# model schema version if so.
 FEATURE_NAMES: list[str] = [
     # Detection geometry — what RF-DETR thought of this region
     "bbox_confidence",
@@ -74,14 +103,6 @@ FEATURE_NAMES: list[str] = [
     # RGB color statistics — computed from the bbox crop
     "rgb_mean_r", "rgb_mean_g", "rgb_mean_b",
     "rgb_std_r",  "rgb_std_g",  "rgb_std_b",
-    # LiDAR 3D features — from lidar.extract_lidar_features
-    "lidar_height_p95_m",
-    "lidar_height_p50_m",
-    "lidar_vertical_spread_m",
-    "lidar_point_count",
-    "lidar_return_ratio",
-    "lidar_intensity_mean",
-    "lidar_intensity_std",
 ]
 
 
@@ -124,30 +145,75 @@ class TrainingExample:
 # ============================================================
 
 
-def auto_label_from_lidar(lidar: LiDARFeatures) -> int | None:
-    """Apply the LiDAR height auto-labeling rule.
+def auto_label_from_tree_top_match(
+    bbox_center_world: tuple[float, float],
+    tree_tops_xy: list[tuple[float, float]],
+    tree_top_heights: list[float],
+    D_pos_m: float = DEFAULT_POSITIVE_TOL_M,
+    D_neg_m: float = DEFAULT_NEGATIVE_TOL_M,
+    min_height_m: float = DEFAULT_MIN_TOP_HEIGHT_M,
+) -> int | None:
+    """Label a detection by distance to the nearest eligible LiDAR tree-top.
 
-    The rule has THREE outcomes:
-      - height_p95_m >= TREE_HEIGHT_THRESHOLD_M → 1 (definitely a tree)
-      - height_p95_m <= BUSH_HEIGHT_THRESHOLD_M → 0 (definitely not)
-      - 2 m < height < 5 m → None (ambiguous, exclude from training)
+    An "eligible" tree-top is one whose reported height is at least
+    `min_height_m`. Short tops (shrubs, low vegetation) are ignored
+    as if they didn't exist.
 
-    Returning None for the middle band keeps the training set CLEAN —
-    we'd rather have fewer high-confidence labels than many noisy ones.
-    The classifier later learns to handle the ambiguous range itself
-    (because all 18 features see the relationship).
+    Given the nearest eligible top at squared-distance d_min:
+
+      - d_min <= D_pos_m  → return 1  (real tree)
+      - d_min >  D_neg_m  → return 0  (false positive)
+      - otherwise         → return None (ambiguous buffer, exclude)
+
+    Edge case: if there are no eligible tree-tops at all, return 0.
+    A detection in a patch with no LiDAR-verified trees is a false
+    positive by construction — there is nothing for it to match.
 
     Args:
-        lidar: LiDARFeatures from forest_pulse.lidar.
+        bbox_center_world: Detection bbox center in world coords
+            (EPSG:25831 meters, same CRS as tree_tops_xy).
+        tree_tops_xy: List of (x, y) tree-top world coords for this
+            patch. Produced by `find_tree_tops_from_chm`.
+        tree_top_heights: List of peak heights parallel to
+            tree_tops_xy. Produced by `find_tree_tops_from_chm` with
+            `return_heights=True`.
+        D_pos_m: Maximum distance for a positive label. Default 2 m
+            matches the Phase 8 eval match tolerance.
+        D_neg_m: Minimum distance for a negative label. Default 4 m
+            leaves a 2-4 m ambiguous buffer.
+        min_height_m: Ignore tops shorter than this. Default 5 m.
 
     Returns:
-        1 (tree), 0 (bush), or None (ambiguous - skip).
+        1 (real tree), 0 (false positive), or None (ambiguous).
     """
-    if lidar.height_p95_m >= TREE_HEIGHT_THRESHOLD_M:
-        return 1
-    if lidar.height_p95_m <= BUSH_HEIGHT_THRESHOLD_M:
+    # Filter tree-tops by height. `find_tree_tops_from_chm` already
+    # filters by the same threshold, so this is typically a no-op —
+    # but keeping the re-filter here makes the function safe to call
+    # in any context and keeps the semantics explicit.
+    eligible = [
+        xy for xy, h in zip(tree_tops_xy, tree_top_heights)
+        if h >= min_height_m
+    ]
+    if not eligible:
+        # No LiDAR-verified trees anywhere nearby → definitely a FP.
         return 0
-    return None
+
+    cx, cy = bbox_center_world
+    # Squared distance is enough — we only need ordering + threshold.
+    d_sq_min = float("inf")
+    for tx, ty in eligible:
+        dx = cx - tx
+        dy = cy - ty
+        d_sq = dx * dx + dy * dy
+        if d_sq < d_sq_min:
+            d_sq_min = d_sq
+
+    d_min = float(np.sqrt(d_sq_min))
+    if d_min <= D_pos_m:
+        return 1
+    if d_min > D_neg_m:
+        return 0
+    return None  # buffer zone — exclude from training
 
 
 # ============================================================
@@ -160,28 +226,26 @@ def extract_classifier_features(
     bbox_xyxy: np.ndarray,
     bbox_confidence: float,
     health: HealthScore,
-    lidar: LiDARFeatures,
 ) -> dict[str, float]:
-    """Build the canonical 18-feature vector for one detection.
+    """Build the canonical 11-feature vector for one detection.
 
     Combines:
-      - RF-DETR's own confidence + bbox geometry
-      - GRVI / ExG from health scoring
-      - RGB color statistics computed from the bbox crop
-      - 7 LiDAR fields from extract_lidar_features
+      - RF-DETR's own confidence + bbox geometry (3 features)
+      - GRVI / ExG from health scoring (2 features)
+      - RGB color statistics computed from the bbox crop (6 features)
 
-    Returns a flat dict keyed by FEATURE_NAMES (no nested structures).
-    Callers turn this into a numpy array via `_features_to_vector`.
+    NO LiDAR features — this classifier learns to distill LiDAR
+    knowledge into RGB space so it transfers to non-LiDAR settings.
+    See module docstring for rationale.
 
     Args:
         image: Full RGB image (H, W, 3) uint8.
         bbox_xyxy: Detection bbox in pixel coords [x1, y1, x2, y2].
         bbox_confidence: RF-DETR confidence for this detection.
         health: HealthScore for this detection.
-        lidar: LiDARFeatures for this detection.
 
     Returns:
-        Dict with all 18 keys from FEATURE_NAMES, all finite floats.
+        Dict with all 11 keys from FEATURE_NAMES, all finite floats.
     """
     geo = _bbox_geometry(bbox_xyxy)
     crop = _crop_image(image, bbox_xyxy)
@@ -199,13 +263,6 @@ def extract_classifier_features(
         "rgb_std_r": rgb["std_r"],
         "rgb_std_g": rgb["std_g"],
         "rgb_std_b": rgb["std_b"],
-        "lidar_height_p95_m": float(lidar.height_p95_m),
-        "lidar_height_p50_m": float(lidar.height_p50_m),
-        "lidar_vertical_spread_m": float(lidar.vertical_spread_m),
-        "lidar_point_count": float(lidar.point_count),
-        "lidar_return_ratio": float(lidar.return_ratio),
-        "lidar_intensity_mean": float(lidar.intensity_mean),
-        "lidar_intensity_std": float(lidar.intensity_std),
     }
 
 
@@ -215,12 +272,22 @@ def build_training_examples(
     """Convert per-patch detection data → labeled TrainingExamples.
 
     Each `patch_record` is a dict with keys:
-        name, image, detections, health_scores, lidar_features
+        name, image, detections, health_scores,
+        tree_tops_world, tree_top_heights,
+        image_bounds, image_size_px
+
+    The `tree_tops_world` + `tree_top_heights` lists come from
+    `find_tree_tops_from_chm(..., return_heights=True)` — one per
+    patch, shared across all detections in that patch.
 
     For each detection in each patch:
-      1. Auto-label from LiDAR height
-      2. If ambiguous (None), skip
-      3. Else extract features and add a TrainingExample
+      1. Compute the detection's bbox center in world coords (batched
+         per patch via `bbox_centers_to_world` for vectorization).
+      2. Run `auto_label_from_tree_top_match` against the patch's
+         tree-tops.
+      3. If label is None (buffer zone), skip.
+      4. Else extract the 11 RGB/bbox/health features and append
+         a TrainingExample.
 
     Args:
         patch_records: List of dicts as described above.
@@ -230,18 +297,36 @@ def build_training_examples(
         order. Empty input → empty list.
     """
     examples: list[TrainingExample] = []
+    n_skipped_buffer = 0
+
     for record in patch_records:
         patch_name = record["name"]
         image = record["image"]
         detections = record["detections"]
         health_scores = record["health_scores"]
-        lidar_features = record["lidar_features"]
+        tree_tops_world = record["tree_tops_world"]
+        tree_top_heights = record["tree_top_heights"]
+        image_bounds = record["image_bounds"]
+        image_size_px = record["image_size_px"]
 
-        # Iterate one detection at a time. Skip examples whose LiDAR
-        # height falls in the ambiguous middle band.
-        for i, lidar in enumerate(lidar_features):
-            label = auto_label_from_lidar(lidar)
+        if len(detections) == 0:
+            continue
+
+        # Vectorize pixel→world conversion once per patch — cheap and
+        # avoids re-running the Y-flip math per detection.
+        centers = bbox_centers_to_world(
+            detections, image_bounds, image_size_px,
+        )
+
+        for i in range(len(detections)):
+            center = (float(centers[i, 0]), float(centers[i, 1]))
+            label = auto_label_from_tree_top_match(
+                bbox_center_world=center,
+                tree_tops_xy=tree_tops_world,
+                tree_top_heights=tree_top_heights,
+            )
             if label is None:
+                n_skipped_buffer += 1
                 continue
 
             xyxy = detections.xyxy[i]
@@ -257,7 +342,6 @@ def build_training_examples(
                 bbox_xyxy=xyxy,
                 bbox_confidence=confidence,
                 health=health,
-                lidar=lidar,
             )
             examples.append(TrainingExample(
                 features=features,
@@ -267,10 +351,11 @@ def build_training_examples(
             ))
 
     n_tree = sum(1 for e in examples if e.label == 1)
-    n_bush = sum(1 for e in examples if e.label == 0)
+    n_fp = sum(1 for e in examples if e.label == 0)
     logger.info(
-        "build_training_examples: %d total (%d tree, %d bush)",
-        len(examples), n_tree, n_bush,
+        "build_training_examples: %d total "
+        "(%d tree, %d false-positive, %d skipped as buffer)",
+        len(examples), n_tree, n_fp, n_skipped_buffer,
     )
     return examples
 
@@ -309,6 +394,7 @@ def train_tree_classifier(
         recall_score,
     )
     from sklearn.model_selection import train_test_split
+    from sklearn.utils.class_weight import compute_sample_weight
 
     if not examples:
         raise ValueError("Cannot train on an empty examples list.")
@@ -324,8 +410,13 @@ def train_tree_classifier(
         X, y, test_size=test_size, random_state=random_state, stratify=stratify,
     )
 
+    # Balanced sample_weight — tree-top-match labels are usually
+    # dominated by the FP class. GradientBoostingClassifier doesn't
+    # accept class_weight= directly, so we pass per-sample weights.
+    sample_weight = compute_sample_weight("balanced", y_train)
+
     model = GradientBoostingClassifier(random_state=random_state)
-    model.fit(X_train, y_train)
+    model.fit(X_train, y_train, sample_weight=sample_weight)
 
     return _evaluate_and_wrap(
         model, X_train, y_train, X_test, y_test,
@@ -360,6 +451,7 @@ def train_tree_classifier_patch_split(
         precision_score,
         recall_score,
     )
+    from sklearn.utils.class_weight import compute_sample_weight
 
     if not examples:
         raise ValueError("Cannot train on an empty examples list.")
@@ -377,8 +469,11 @@ def train_tree_classifier_patch_split(
     X_test = np.array([_features_to_vector(e.features) for e in test_examples])
     y_test = np.array([e.label for e in test_examples], dtype=int)
 
+    # Balanced sample_weight — see train_tree_classifier for rationale.
+    sample_weight = compute_sample_weight("balanced", y_train)
+
     model = GradientBoostingClassifier(random_state=random_state)
-    model.fit(X_train, y_train)
+    model.fit(X_train, y_train, sample_weight=sample_weight)
 
     return _evaluate_and_wrap(
         model, X_train, y_train, X_test, y_test,

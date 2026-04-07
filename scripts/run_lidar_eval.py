@@ -40,8 +40,16 @@ sys.path.insert(0, str(PROJECT_ROOT / "autoresearch"))
 
 from eval_lidar import evaluate_patches_against_lidar  # noqa: E402
 
+from forest_pulse.classifier import (  # noqa: E402
+    TreeClassifier,
+    extract_classifier_features,
+    load_classifier,
+    predict_tree_probabilities_batch,
+)
 from forest_pulse.detect import detect_trees  # noqa: E402
+from forest_pulse.health import score_health  # noqa: E402
 from forest_pulse.lidar import (  # noqa: E402
+    _strip_rfdetr_metadata,
     fetch_laz_for_patch,
     lidar_tree_top_filter,
 )
@@ -103,6 +111,7 @@ def _build_patch_record(patch_name: str, checkpoint: str) -> dict | None:
 
     return {
         "name": patch_name,
+        "image": image,
         "detections": detections,
         "image_bounds": bounds,
         "image_size_px": image_size,
@@ -110,10 +119,51 @@ def _build_patch_record(patch_name: str, checkpoint: str) -> dict | None:
     }
 
 
+def _apply_classifier(rec: dict, classifier: TreeClassifier) -> "sv.Detections":  # noqa: F821
+    """Apply a trained classifier to a patch record's detections.
+
+    Scores GRVI/ExG via score_health, extracts the 11-feature RGB
+    vector per detection, batch-predicts tree probabilities, and
+    keeps only those at or above `classifier.threshold`.
+
+    Empty detections pass through unchanged.
+    """
+    detections = rec["detections"]
+    if len(detections) == 0:
+        return detections
+
+    # Strip rfdetr's source_shape / source_image fields before any
+    # boolean slicing — supervision indexes .data and those fields
+    # have length 640 (image height), not n_detections.
+    _strip_rfdetr_metadata(detections)
+
+    image = rec["image"]
+    health_scores = score_health(image, detections)
+
+    feature_dicts = []
+    for i in range(len(detections)):
+        confidence = (
+            float(detections.confidence[i])
+            if detections.confidence is not None
+            else 0.0
+        )
+        feature_dicts.append(extract_classifier_features(
+            image=image,
+            bbox_xyxy=detections.xyxy[i],
+            bbox_confidence=confidence,
+            health=health_scores[i],
+        ))
+
+    probs = predict_tree_probabilities_batch(classifier, feature_dicts)
+    keep_mask = probs >= classifier.threshold
+    return detections[keep_mask]
+
+
 def run_evaluation(
     patches: list[str],
     checkpoint: str,
     mode: str = "baseline",
+    classifier_path: Path | None = None,
 ) -> None:
     """Build records for each patch and run the LiDAR evaluator.
 
@@ -121,10 +171,24 @@ def run_evaluation(
         patches: Patch filenames to evaluate.
         checkpoint: RF-DETR checkpoint path.
         mode: One of "baseline" (no post-processing), "filter" (apply
-            lidar_tree_top_filter before eval). Phase 9.5b will add
-            "classifier" as a third mode.
+            lidar_tree_top_filter before eval), or "classifier" (apply
+            the trained RGB classifier before eval).
+        classifier_path: Required when mode=="classifier". Path to the
+            joblib file produced by `scripts/train_classifier.py`.
     """
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Load the classifier ONCE if needed — cheap joblib.load.
+    classifier: TreeClassifier | None = None
+    if mode == "classifier":
+        if classifier_path is None:
+            raise ValueError("classifier mode requires --classifier PATH")
+        classifier = load_classifier(classifier_path)
+        print(f"Loaded classifier from {classifier_path}")
+        print(
+            f"  Features: {len(classifier.feature_names)}, "
+            f"threshold: {classifier.threshold:.2f}"
+        )
 
     print(f"Running LiDAR-verified evaluation on {len(patches)} patches...")
     print(f"Checkpoint: {checkpoint}")
@@ -139,10 +203,10 @@ def run_evaluation(
         if rec is None:
             continue
 
-        # Phase 9.5a: deterministic LiDAR tree-top filter. Runs on the
-        # same CHM the eval will compute a moment later, so the cost
-        # is essentially a single extra numpy distance computation.
         if mode == "filter":
+            # Phase 9.5a: deterministic LiDAR tree-top filter. Runs on
+            # the same CHM the eval will compute a moment later, so the
+            # cost is essentially a single extra numpy distance pass.
             n_before = len(rec["detections"])
             rec["detections"] = lidar_tree_top_filter(
                 rec["detections"],
@@ -154,6 +218,16 @@ def run_evaluation(
             print(
                 f"  [{i}/{len(patches)}] {name} — "
                 f"{n_before} → {n_after} detections after filter "
+                f"({elapsed:.1f}s)"
+            )
+        elif mode == "classifier":
+            # Phase 9.5b: learned RGB classifier as a precision filter.
+            n_before = len(rec["detections"])
+            rec["detections"] = _apply_classifier(rec, classifier)
+            n_after = len(rec["detections"])
+            print(
+                f"  [{i}/{len(patches)}] {name} — "
+                f"{n_before} → {n_after} detections after classifier "
                 f"({elapsed:.1f}s)"
             )
         else:
@@ -257,7 +331,8 @@ def main():
         default=str(DEFAULT_CHECKPOINT),
         help="Path to RF-DETR checkpoint.",
     )
-    parser.add_argument(
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
         "--filter",
         action="store_true",
         help=(
@@ -266,11 +341,34 @@ def main():
             "reference upper bound for any post-processor."
         ),
     )
+    mode_group.add_argument(
+        "--classifier",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a trained classifier joblib (produced by "
+            "scripts/train_classifier.py). Applied as a precision "
+            "filter before eval — measures the RGB distillation "
+            "hypothesis against the filter upper bound."
+        ),
+    )
     args = parser.parse_args()
 
     patches = args.patch if args.patch else DEFAULT_PATCHES
-    mode = "filter" if args.filter else "baseline"
-    run_evaluation(patches, args.checkpoint, mode=mode)
+    if args.filter:
+        mode = "filter"
+        classifier_path = None
+    elif args.classifier:
+        mode = "classifier"
+        classifier_path = Path(args.classifier)
+    else:
+        mode = "baseline"
+        classifier_path = None
+    run_evaluation(
+        patches, args.checkpoint,
+        mode=mode, classifier_path=classifier_path,
+    )
 
 
 if __name__ == "__main__":

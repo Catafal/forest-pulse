@@ -1,9 +1,15 @@
 ## Current State
 
-Phase: 5 COMPLETE — Full pipeline + SAM2 hybrid segmentation shipped
-Model:  RF-DETR self-trained at conf 0.3 | mAP50 0.904 (on self-labels, inflated)
-Honest: real recall ~20-30% on dense canopy, precision ~80-90% on what IS detected
-Next:   LiDAR feature extraction → honest eval metric → auto-labeled classifier
+Phase: 9.5 COMPLETE — Deterministic LiDAR filter shipped, RGB-distillation
+        hypothesis refuted (negative result documented)
+Model:  RF-DETR self-trained at conf 0.3
+Eval:   Honest LiDAR-verified F1 baseline = 0.108 (P=0.268, R=0.068)
+        + 9.5a deterministic filter →    F1 = 0.127 (P=0.983, hits ceiling)
+        + 9.5b RGB classifier @0.5  →    F1 = 0.103 (worse than baseline)
+        Recall is the mountain (6.8%), precision is the anthill — F1 is
+        ceilinged at 0.127 by RF-DETR's fundamental recall limit on dense
+        Mediterranean canopy at 25 cm/px.
+Next:   Phase 10 — wire 9.5a deterministic filter into production pipeline
 
 ## Completed
 
@@ -44,69 +50,112 @@ Phase 6: SAM2 hybrid segmentation
   - Best: patch 0250 (dense beech) 6 → 10 (+67%)
   - Hybrid is 26x slower (~7s per patch vs 0.3s)
 
+Phase 7: LiDAR feature extraction
+- [x] laspy + lazrs deps for LAZ point-cloud reading
+- [x] lidar.py::fetch_laz_for_patch — verified ICGC URL pattern (450k+ tiles)
+- [x] lidar.py::compute_chm_from_laz — DSM−DTM rasterization with disk cache
+- [x] lidar.py::extract_lidar_features — 7 per-tree features (height percentiles,
+      vertical spread, point count, return ratio, intensity stats)
+- [x] LiDARFeatures dataclass + georef.py optional LiDAR columns
+- [x] 23 unit tests with synthetic point clouds (no real LAZ in CI)
+
+Phase 8: LiDAR-verified honest eval metric (autoresearch/eval_lidar.py)
+- [x] find_tree_tops_from_chm — local-max filtering (lidR / Spanish Forest
+      Inventory standard technique)
+- [x] match_predictions_to_truth — greedy nearest-neighbor at 2m tolerance
+- [x] evaluate_patches_against_lidar — micro-aggregated multi-patch eval
+- [x] First honest baseline F1: **0.108** on 10-patch reference set
+      (840 predictions, 3320 LiDAR tree-tops, 225 matches at 2m)
+- [x] Sobering: real recall is 6.8%, real precision is 26.8%
+      → mAP 0.904 was inflated 8.4× by the self-trained labels
+- [x] 22 unit tests, separate from LOCKED autoresearch/eval.py
+
+Phase 9: Auto-labeled tree classifier — TAUTOLOGICAL (Phase 9.5 pivot)
+- [x] sklearn GradientBoostingClassifier infrastructure
+      (joblib save/load, patch-level split, batch predict)
+- [x] 18-feature multi-modal vector (RGB + GRVI/ExG + 7 LiDAR fields)
+- [x] Auto-label rule: height_p95 ≥ 5m → tree, ≤ 2m → bush
+- [-] Result was a tautology: classifier learned the labeling rule itself
+      (96.4% feature importance on lidar_height_p95_m alone), 99/1 class
+      imbalance, useless for non-LiDAR transfer. Replaced in Phase 9.5.
+
+Phase 9.5a: Deterministic LiDAR tree-top filter (commit 8c3317a)
+- [x] Moved find_tree_tops_from_chm to forest_pulse/lidar.py
+      (autoresearch/eval_lidar.py re-exports for back-compat)
+- [x] New public API: bbox_centers_to_world, lidar_tree_top_filter
+- [x] return_heights=True kwarg for downstream label derivation
+- [x] scripts/run_lidar_eval.py --filter flag, per-mode CSV
+- [x] **F1 = 0.127** (P = 0.983, R = 0.068) — hits theoretical ceiling.
+      Every kept detection is matched to a real LiDAR tree-top by
+      construction. 4 FPs from greedy-matching tie-breaks.
+- [x] 7 new tests (synthetic CHM via _filter_from_chm test seam)
+
+Phase 9.5b: RGB-distilled classifier — HYPOTHESIS REFUTED
+- [x] FEATURE_NAMES collapsed 18 → 11 (NO lidar_* features in vector)
+- [x] auto_label_from_tree_top_match: 2m positive, 4m negative, 2-4m buffer
+- [x] balanced sample_weight via compute_sample_weight (GBC quirk)
+- [x] scripts/train_classifier.py: per-patch CHM + tree-tops for labels
+- [x] scripts/run_lidar_eval.py --classifier PATH flag
+- [x] Real training: 562 examples (229 tree, 333 FP, 41% minority — vs
+      Phase 9's 1.5%), feature importance distributed across 5+ features
+      (top: bbox_aspect_ratio 0.143, grvi 0.135, exg 0.126)
+- [x] Internal test F1 = 0.379 (model itself misclassifies ~62%)
+- [-] **Eval F1 = 0.103 @ default threshold, peaks at 0.107 @ thr=0.20.**
+      NEVER beats baseline 0.108. Threshold sweep proves it.
+      Hypothesis "RGB at 25 cm/px can distill LiDAR knowledge" REFUTED.
+      → recall is the bottleneck and a precision-only filter cannot
+        net-improve F1 when recall is already at 6.8%.
+      → RGB at 25 cm/px lacks the discriminative signal to separate
+        real trees from RF-DETR false positives.
+- [x] 132/132 tests passing, ruff clean, infrastructure reusable
+
 ## Key learnings (the honest ones)
-- mAP 0.904 is inflated — measured against self-labels, not ground truth
-- Real recall ~20-30% in dense uniform canopy (crown merging problem, not model problem)
-- Precision ~80-90% on what IS detected (based on visual review)
+- mAP 0.904 was inflated 8.4× — real F1 is 0.108 (LiDAR-verified)
+- Real recall is 6.8% in dense Mediterranean canopy (crown merging)
+- Precision is 26.8% — bushes, rocks, off-center boxes
+- Recall is the mountain, precision is the anthill — any post-filter
+  is ceilinged at F1 = 0.127 by the recall floor
+- LiDAR tree-top matching gives a deterministic filter that hits the
+  ceiling. Use it directly in Catalunya. No learning required.
+- RGB at 25 cm/px does NOT contain enough signal to recover the LiDAR
+  precision boundary on the RF-DETR output distribution. The
+  RGB-distillation hypothesis is empirically refuted on this dataset.
 - NDVI can't distinguish trees from bushes (both chlorophyll-rich)
-- LiDAR height is the ONLY reliable tree-vs-bush discriminator
-- Foundation segmentation models (SAM2) help modestly on distinct crowns, not on uniform canopy
-- Detection and classification should be separate concerns (post-hoc classifier architecture)
+- Foundation segmentation models (SAM2) help modestly on distinct
+  crowns, not on uniform canopy
+- Detection and classification should still be separate concerns
+  (Phase 12 species classification should reuse the Phase 9.5b
+  infrastructure with species labels — different question, may yield
+  different result because species cues exist at 25 cm/px)
 
 ## Planned sequence — "detect once, classify many times"
 
-### TODO Phase 7: LiDAR feature extraction  (NEXT — 3-4 hours)
-- [ ] Add `laspy` dependency
-- [ ] Download ICGC LAZ tiles for Montseny (~12 GB, gitignored)
-  - URL pattern: datacloud.icgc.cat/datacloud/lidar-territorial/laz_unzip/...
-- [ ] lidar.py::fetch_laz_for_patch(x_center, y_center) — download + cache 1km LAZ
-- [ ] lidar.py::compute_chm_from_laz(laz_path, bounds) — rasterize DSM − DTM
-- [ ] lidar.py::extract_lidar_features(detections, laz_path, bounds) → per-tree:
-  - height_p95_m        — tree top (use for > 5m filter)
-  - height_p50_m        — crown center height
-  - vertical_spread_m   — p95 − p5, proxies trunk+crown depth
-  - point_count         — LiDAR return density
-  - return_ratio        — multi-return / single-return (canopy density)
-  - intensity_mean      — needle vs broadleaf reflectance signal
-  - intensity_std       — crown heterogeneity
-- [ ] Wire existing filter_by_height() to use the new CHM path
-- [ ] Add LiDAR columns to georef.py output when features are available
-- [ ] Smoke test on patch 0250 — verify shrub-vs-tree discrimination
-
-### TODO Phase 8: Honest eval metric  (1-2 hours)
-- [ ] Build a LiDAR-verified eval set from held-out patches
-- [ ] New eval_lidar_verified.py — mAP against physically-verified trees
-- [ ] Run current RF-DETR model against it → FIRST honest number
-- [ ] Document the gap between inflated self-labels and real performance
-
-### TODO Phase 9: Auto-labeled classifier  (2-3 hours)
-- [ ] LiDAR auto-labeler:
-  - height_p95 > 5m → label = "tree"  (auto)
-  - height_p95 < 2m → label = "bush"  (auto)
-  - 2m < height < 5m → skip (ambiguous)
-- [ ] Build feature matrix per detection:
-  - mean_grvi, mean_exg, mean_rgb (from health)
-  - mask_area_m2, mask_circularity (from SAM2)
-  - lidar_height_p95, vertical_spread, canopy_density, intensity (from LiDAR)
-- [ ] Train small XGBoost classifier on auto-labels
-- [ ] Evaluate against held-out LiDAR-verified set
-- [ ] Target: > 90% precision on tree vs bush
-
-### TODO Phase 10: Wire classifier into pipeline  (1 hour)
-- [ ] Classifier becomes final stage in full_pipeline_demo.py
-- [ ] GeoJSON export only includes confirmed trees
+### TODO Phase 10: Wire 9.5a deterministic filter into pipeline  (1 hour)
+- [ ] full_pipeline_demo.py — apply lidar_tree_top_filter as the final
+      precision stage in Catalunya / LiDAR-covered runs
+- [ ] CLI flag to opt out for non-LiDAR settings
+- [ ] GeoJSON export only includes filter-confirmed trees on Catalunya
 - [ ] Log kept / dropped counts per stage
+- [ ] Update full_pipeline_demo doc to reflect F1 0.108 → 0.127
 
-### TODO Phase 11: Auto-research  (overnight, when ready)
-- [ ] Only AFTER honest eval metric exists (Phase 8)
-- [ ] Optimize RF-DETR hyperparams + classifier hyperparams against LiDAR-verified mAP
-- [ ] Karpathy-style harness already exists in autoresearch/
+### TODO Phase 11: Recall-targeting work  (NEW priority — recall is the bottleneck)
+- [ ] Phase 8 proved recall = 6.8% caps F1 at 0.127 even with a perfect filter
+- [ ] Options to actually improve F1:
+  - Higher-resolution imagery (sub-10 cm/px from drone) — single biggest lever
+  - Detection paradigm change (point/keypoint head, dense canopy decomposer)
+  - Re-train RF-DETR on LiDAR-verified labels (if eval ever exceeds train data quality)
+- [ ] All of these are bigger commitments than Phases 9.5a/b — needs explicit planning
 
 ### TODO Phase 12 (future): Species classification
-- [ ] Same classifier architecture, new output head
+- [ ] Reuse Phase 9.5b infrastructure (classifier.py + train_classifier.py)
+- [ ] Swap binary tree-vs-FP labels for multi-class species labels
+- [ ] Feature vector already has the right shape (RGB + GRVI + bbox geometry)
+- [ ] Add LiDAR features back IF labels come from human annotation (no
+      tautology risk because labels are human, features are mixed)
 - [ ] Needs some species-labeled examples (dozens per species)
-- [ ] LiDAR features are critical here — 15-30% accuracy boost per published papers
-- [ ] Feature vector already includes everything the classifier needs
+- [ ] Visual species cues (broadleaf vs conifer texture, color variance) DO
+      exist at 25 cm/px, so the RGB feature path may work better here than
+      it did for the tree-vs-FP task
 
 ## Core architectural principle
 
@@ -117,7 +166,9 @@ iterate in seconds (retrain XGBoost) instead of 20+ minutes (retrain RF-DETR).
 
 ## Blockers
 
-None. LiDAR LAZ path is ready to implement — just needs the hours.
+None for Phase 10 (wire 9.5a into pipeline).
+Phase 11 recall work needs strategic decision about imagery resolution
+or detection paradigm change before any code can land.
 
 ## Deferred / out of scope
 

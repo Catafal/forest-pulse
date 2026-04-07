@@ -1,4 +1,4 @@
-"""Train the post-detector tree classifier on the 10-patch reference set.
+"""Train the RGB-distilled tree classifier on the 10-patch reference set.
 
 End-to-end training driver. For each patch in the reference set:
 
@@ -6,12 +6,15 @@ End-to-end training driver. For each patch in the reference set:
   2. Run RF-DETR detection
   3. Score health (GRVI / ExG) for each detection
   4. Download (or reuse cached) LAZ tile
-  5. Extract per-tree LiDAR features
+  5. Compute CHM + find LiDAR tree-tops (world coords + heights)
 
-Then auto-label every detection via LiDAR height (>5 m = tree, <2 m =
-bush, in-between excluded), build the multi-modal feature matrix, run
-a leakage-safe patch-level 8/2 split, train a sklearn
-GradientBoostingClassifier, save the model + a CSV report.
+Then auto-label every detection by matching its bbox center to the
+nearest eligible LiDAR tree-top (<=2 m → tree, >4 m → FP, 2-4 m
+ambiguous), build the 11-feature RGB vector (NO LiDAR features in
+the vector — LiDAR is only a training-time oracle), run a
+leakage-safe patch-level 8/2 split, train a sklearn
+GradientBoostingClassifier with balanced sample weights, save the
+model + a CSV report.
 
 Usage:
     python scripts/train_classifier.py
@@ -37,7 +40,12 @@ from forest_pulse.classifier import (
 )
 from forest_pulse.detect import detect_trees
 from forest_pulse.health import score_health
-from forest_pulse.lidar import extract_lidar_features, fetch_laz_for_patch
+from forest_pulse.lidar import (
+    _read_chm_raster,
+    compute_chm_from_laz,
+    fetch_laz_for_patch,
+    find_tree_tops_from_chm,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +78,12 @@ def _get_patch_center(patch_name: str) -> tuple[float, float]:
 
 
 def _build_patch_record(patch_name: str, checkpoint: str) -> dict | None:
-    """Run the full detect → health → LiDAR-features pipeline for one patch."""
+    """Run the full detect → health → CHM → tree-tops pipeline for one patch.
+
+    Unlike Phase 9 (which extracted per-tree LiDAR features as inputs),
+    Phase 9.5 computes tree-tops ONCE per patch and uses them only for
+    labeling — they never enter the feature vector.
+    """
     patch_path = PATCH_DIR / patch_name
     if not patch_path.exists():
         logger.error("Patch missing: %s", patch_path)
@@ -90,9 +103,16 @@ def _build_patch_record(patch_name: str, checkpoint: str) -> dict | None:
         return None
 
     health_scores = score_health(image, detections)
+
+    # Phase 9.5: fetch LAZ → compute CHM → find LiDAR tree-tops (world
+    # coords + per-top heights) for this patch. The tree-tops are the
+    # label oracle used by auto_label_from_tree_top_match in
+    # build_training_examples.
     laz_path = fetch_laz_for_patch(x_center, y_center)
-    lidar_features = extract_lidar_features(
-        detections, bounds, image_size, laz_path,
+    chm_path = compute_chm_from_laz(laz_path, bounds)
+    chm, transform = _read_chm_raster(chm_path)
+    tree_tops_world, tree_top_heights = find_tree_tops_from_chm(
+        chm, transform, return_heights=True,
     )
 
     return {
@@ -100,21 +120,28 @@ def _build_patch_record(patch_name: str, checkpoint: str) -> dict | None:
         "image": image,
         "detections": detections,
         "health_scores": health_scores,
-        "lidar_features": lidar_features,
-        "bounds": bounds,
-        "image_size": image_size,
+        "tree_tops_world": tree_tops_world,
+        "tree_top_heights": tree_top_heights,
+        "image_bounds": bounds,
+        "image_size_px": image_size,
     }
 
 
 def _print_metrics(metrics: dict) -> None:
-    """Pretty-print the training metrics + feature importance."""
+    """Pretty-print the training metrics + feature importance.
+
+    Labels are "tree" (class 1 — RF-DETR detection matched a LiDAR
+    tree-top within 2 m) and "FP" (class 0 — no eligible tree-top
+    within 4 m). The underlying metric keys in the dict are still
+    `n_*_bush` for schema back-compat with Phase 9.
+    """
     print(f"\n{'=' * 72}")
-    print("  Tree Classifier Training Report")
+    print("  RGB-Distilled Tree Classifier Training Report")
     print(f"{'=' * 72}")
     print(f"  Train: {metrics['n_train']} examples"
-          f" ({metrics['n_train_tree']} tree, {metrics['n_train_bush']} bush)")
+          f" ({metrics['n_train_tree']} tree, {metrics['n_train_bush']} FP)")
     print(f"  Test:  {metrics['n_test']} examples"
-          f" ({metrics['n_test_tree']} tree, {metrics['n_test_bush']} bush)")
+          f" ({metrics['n_test_tree']} tree, {metrics['n_test_bush']} FP)")
     print()
     print("  Test set metrics:")
     print(f"    Accuracy:  {metrics['accuracy']:.4f}")
@@ -183,8 +210,12 @@ def run_training(
         return
 
     n_tree = sum(1 for e in examples if e.label == 1)
-    n_bush = sum(1 for e in examples if e.label == 0)
-    print(f"  Total examples: {len(examples)} ({n_tree} tree, {n_bush} bush)")
+    n_fp = sum(1 for e in examples if e.label == 0)
+    minority_pct = 100.0 * min(n_tree, n_fp) / max(len(examples), 1)
+    print(
+        f"  Total examples: {len(examples)} "
+        f"({n_tree} tree, {n_fp} FP, minority = {minority_pct:.1f}%)"
+    )
 
     print()
     print("Training GradientBoostingClassifier (patch-level split)...")
@@ -195,10 +226,11 @@ def run_training(
     _print_metrics(metrics)
 
     save_classifier(classifier, CLASSIFIER_OUTPUT_PATH)
-    _save_report_csv(metrics, REPORT_DIR / "training_report.csv")
+    report_path = REPORT_DIR / "training_report_rgb.csv"
+    _save_report_csv(metrics, report_path)
     print()
     print(f"  Model:  {CLASSIFIER_OUTPUT_PATH}")
-    print(f"  Report: {REPORT_DIR / 'training_report.csv'}")
+    print(f"  Report: {report_path}")
 
 
 def main():

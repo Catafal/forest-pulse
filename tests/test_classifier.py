@@ -1,8 +1,11 @@
-"""Tests for forest_pulse.classifier — pure functions + tiny synthetic training.
+"""Tests for forest_pulse.classifier — pure functions + synthetic training.
 
-No real LAZ files, no real model checkpoints. Synthetic LiDARFeatures
+No real LAZ files, no real model checkpoints. Synthetic feature dicts
 and synthetic image crops cover all the pure functions. The training
 test uses a tiny separable dataset to verify end-to-end behavior.
+
+Phase 9.5b: labels come from tree-top matching, not LiDAR height,
+and the feature vector has no LiDAR fields.
 """
 
 import tempfile
@@ -12,17 +15,18 @@ import numpy as np
 import pytest
 
 from forest_pulse.classifier import (
-    BUSH_HEIGHT_THRESHOLD_M,
+    DEFAULT_MIN_TOP_HEIGHT_M,
+    DEFAULT_NEGATIVE_TOL_M,
+    DEFAULT_POSITIVE_TOL_M,
     DEFAULT_PROB_THRESHOLD,
     FEATURE_NAMES,
-    TREE_HEIGHT_THRESHOLD_M,
     TrainingExample,
     TreeClassifier,
     _bbox_geometry,
     _crop_image,
     _features_to_vector,
     _rgb_statistics,
-    auto_label_from_lidar,
+    auto_label_from_tree_top_match,
     extract_classifier_features,
     load_classifier,
     predict_tree_probabilities_batch,
@@ -32,26 +36,10 @@ from forest_pulse.classifier import (
     train_tree_classifier_patch_split,
 )
 from forest_pulse.health import HealthScore
-from forest_pulse.lidar import LiDARFeatures
 
 # ============================================================
 # Helpers
 # ============================================================
-
-
-def _make_lidar(height: float, **overrides) -> LiDARFeatures:
-    defaults = {
-        "tree_id": 0,
-        "height_p95_m": height,
-        "height_p50_m": height * 0.7,
-        "vertical_spread_m": 8.0,
-        "point_count": 100,
-        "return_ratio": 0.5,
-        "intensity_mean": 1000.0,
-        "intensity_std": 200.0,
-    }
-    defaults.update(overrides)
-    return LiDARFeatures(**defaults)
 
 
 def _make_health(grvi: float = 0.2, exg: float = 30.0) -> HealthScore:
@@ -61,9 +49,14 @@ def _make_health(grvi: float = 0.2, exg: float = 30.0) -> HealthScore:
 
 
 def _make_features(label: int) -> dict[str, float]:
-    """Build a complete feature dict, biased high (tree) or low (bush)."""
+    """Build a complete 11-feature dict, biased high (tree) or low (FP).
+
+    These separable profiles are used in the training tests to verify
+    the classifier can learn a non-trivial decision boundary on pure
+    RGB/bbox/health features — no LiDAR in the feature vector.
+    """
     if label == 1:
-        # Tree-like — high LiDAR, big bbox, healthy color
+        # Real-tree-like — confident bbox, bigger crown, healthy color
         return {
             "bbox_confidence": 0.9,
             "bbox_area_px": 1500.0,
@@ -76,15 +69,8 @@ def _make_features(label: int) -> dict[str, float]:
             "rgb_std_r": 18.0,
             "rgb_std_g": 25.0,
             "rgb_std_b": 14.0,
-            "lidar_height_p95_m": 18.0,
-            "lidar_height_p50_m": 12.0,
-            "lidar_vertical_spread_m": 14.0,
-            "lidar_point_count": 800.0,
-            "lidar_return_ratio": 0.85,
-            "lidar_intensity_mean": 1400.0,
-            "lidar_intensity_std": 300.0,
         }
-    # Bush-like — low LiDAR, small bbox, dull color
+    # False-positive-like — low confidence, small bbox, dull color
     return {
         "bbox_confidence": 0.4,
         "bbox_area_px": 200.0,
@@ -97,47 +83,108 @@ def _make_features(label: int) -> dict[str, float]:
         "rgb_std_r": 8.0,
         "rgb_std_g": 9.0,
         "rgb_std_b": 6.0,
-        "lidar_height_p95_m": 1.2,
-        "lidar_height_p50_m": 0.6,
-        "lidar_vertical_spread_m": 1.0,
-        "lidar_point_count": 80.0,
-        "lidar_return_ratio": 0.2,
-        "lidar_intensity_mean": 700.0,
-        "lidar_intensity_std": 90.0,
     }
 
 
 # ============================================================
-# auto_label_from_lidar
+# auto_label_from_tree_top_match
 # ============================================================
 
 
-def test_auto_label_tree_above_5m():
-    assert auto_label_from_lidar(_make_lidar(10.0)) == 1
+def test_auto_label_tree_top_match_positive_within_D_pos():
+    """Nearest eligible top at 1.5 m → positive label 1."""
+    label = auto_label_from_tree_top_match(
+        bbox_center_world=(0.0, 0.0),
+        tree_tops_xy=[(1.5, 0.0)],
+        tree_top_heights=[10.0],
+    )
+    assert label == 1
 
 
-def test_auto_label_bush_below_2m():
-    assert auto_label_from_lidar(_make_lidar(1.0)) == 0
+def test_auto_label_tree_top_match_negative_beyond_D_neg():
+    """Nearest eligible top at 5 m → negative label 0."""
+    label = auto_label_from_tree_top_match(
+        bbox_center_world=(0.0, 0.0),
+        tree_tops_xy=[(5.0, 0.0)],
+        tree_top_heights=[10.0],
+    )
+    assert label == 0
 
 
-def test_auto_label_ambiguous_3m_returns_none():
-    assert auto_label_from_lidar(_make_lidar(3.0)) is None
+def test_auto_label_tree_top_match_buffer_zone_returns_none():
+    """Nearest eligible top at 3 m (2 < d <= 4) → None."""
+    label = auto_label_from_tree_top_match(
+        bbox_center_world=(0.0, 0.0),
+        tree_tops_xy=[(3.0, 0.0)],
+        tree_top_heights=[10.0],
+    )
+    assert label is None
 
 
-def test_auto_label_boundary_exactly_5m_is_tree():
-    assert auto_label_from_lidar(_make_lidar(5.0)) == 1
+def test_auto_label_tree_top_match_exact_D_pos_boundary_is_positive():
+    """Distance exactly = D_pos (2.0) → label 1 (inclusive on lower)."""
+    label = auto_label_from_tree_top_match(
+        bbox_center_world=(0.0, 0.0),
+        tree_tops_xy=[(2.0, 0.0)],
+        tree_top_heights=[10.0],
+    )
+    assert label == 1
 
 
-def test_auto_label_boundary_exactly_2m_is_bush():
-    assert auto_label_from_lidar(_make_lidar(2.0)) == 0
+def test_auto_label_tree_top_match_exact_D_neg_boundary_is_buffer():
+    """Distance exactly = D_neg (4.0) → None (4.0 still inside buffer,
+    strictly greater-than rule applies)."""
+    label = auto_label_from_tree_top_match(
+        bbox_center_world=(0.0, 0.0),
+        tree_tops_xy=[(4.0, 0.0)],
+        tree_top_heights=[10.0],
+    )
+    assert label is None
 
 
-def test_auto_label_just_above_2m_is_ambiguous():
-    assert auto_label_from_lidar(_make_lidar(2.5)) is None
+def test_auto_label_tree_top_match_ignores_short_tops():
+    """Only top nearby is 3 m tall (below min_height=5) → no eligible
+    tops at all → label 0 by the no-tops rule (would be 1 if short
+    tops were counted, so this test proves they aren't)."""
+    label = auto_label_from_tree_top_match(
+        bbox_center_world=(0.0, 0.0),
+        tree_tops_xy=[(0.5, 0.0)],
+        tree_top_heights=[3.0],
+    )
+    assert label == 0
 
 
-def test_auto_label_just_below_5m_is_ambiguous():
-    assert auto_label_from_lidar(_make_lidar(4.99)) is None
+def test_auto_label_tree_top_match_no_tops_at_all():
+    """Empty tree-top lists → label 0 (nothing to match, definitely FP)."""
+    label = auto_label_from_tree_top_match(
+        bbox_center_world=(0.0, 0.0),
+        tree_tops_xy=[],
+        tree_top_heights=[],
+    )
+    assert label == 0
+
+
+def test_auto_label_tree_top_match_picks_nearest_eligible_over_short():
+    """Short top (ineligible) closer than a tall top (eligible in
+    buffer). If short tops were counted, label would be 1 (d=0.5).
+    Because short tops are ignored, nearest ELIGIBLE is at d=3 →
+    buffer zone → None. Proves the function uses the tall top only."""
+    label = auto_label_from_tree_top_match(
+        bbox_center_world=(0.0, 0.0),
+        tree_tops_xy=[(0.5, 0.0), (3.0, 0.0)],
+        tree_top_heights=[3.0, 10.0],  # first is short, second is tall
+    )
+    assert label is None  # nearest ELIGIBLE top is the tall one at d=3
+
+
+def test_auto_label_tree_top_match_multiple_tops_picks_minimum_distance():
+    """Multiple eligible tops → pick the nearest one for the decision."""
+    label = auto_label_from_tree_top_match(
+        bbox_center_world=(0.0, 0.0),
+        tree_tops_xy=[(10.0, 0.0), (1.0, 0.0), (20.0, 0.0)],
+        tree_top_heights=[10.0, 10.0, 10.0],
+    )
+    assert label == 1  # closest is at 1.0 → positive
 
 
 # ============================================================
@@ -205,8 +252,7 @@ def test_extract_features_returns_all_keys():
     image = np.full((200, 200, 3), 100, dtype=np.uint8)
     bbox = np.array([50.0, 50.0, 150.0, 150.0])
     health = _make_health(grvi=0.3, exg=40.0)
-    lidar = _make_lidar(height=12.0)
-    features = extract_classifier_features(image, bbox, 0.85, health, lidar)
+    features = extract_classifier_features(image, bbox, 0.85, health)
     assert set(features.keys()) == set(FEATURE_NAMES)
 
 
@@ -214,8 +260,7 @@ def test_extract_features_finite_values():
     image = np.full((200, 200, 3), 100, dtype=np.uint8)
     bbox = np.array([50.0, 50.0, 150.0, 150.0])
     health = _make_health()
-    lidar = _make_lidar(height=10.0)
-    features = extract_classifier_features(image, bbox, 0.7, health, lidar)
+    features = extract_classifier_features(image, bbox, 0.7, health)
     for v in features.values():
         assert np.isfinite(v)
 
@@ -227,8 +272,7 @@ def test_extract_features_rgb_means_match_uniform_crop():
     image[:, :, 2] = 25
     bbox = np.array([10.0, 10.0, 100.0, 100.0])
     health = _make_health()
-    lidar = _make_lidar(8.0)
-    features = extract_classifier_features(image, bbox, 0.5, health, lidar)
+    features = extract_classifier_features(image, bbox, 0.5, health)
     assert features["rgb_mean_r"] == 200.0
     assert features["rgb_mean_g"] == 50.0
     assert features["rgb_mean_b"] == 25.0
@@ -245,8 +289,9 @@ def test_features_to_vector_canonical_order():
     assert vector.shape == (len(FEATURE_NAMES),)
     # First element is bbox_confidence per FEATURE_NAMES order
     assert vector[0] == 0.9
-    # Last element is lidar_intensity_std
-    assert vector[-1] == 300.0
+    # Last element is rgb_std_b (the last non-lidar feature)
+    assert FEATURE_NAMES[-1] == "rgb_std_b"
+    assert vector[-1] == 14.0
 
 
 def test_features_to_vector_missing_key_raises():
@@ -397,10 +442,16 @@ def test_save_load_round_trip():
 # ============================================================
 
 
-def test_height_thresholds_match_spec():
-    assert TREE_HEIGHT_THRESHOLD_M == 5.0
-    assert BUSH_HEIGHT_THRESHOLD_M == 2.0
+def test_labeling_thresholds_match_spec():
+    assert DEFAULT_POSITIVE_TOL_M == 2.0
+    assert DEFAULT_NEGATIVE_TOL_M == 4.0
+    assert DEFAULT_MIN_TOP_HEIGHT_M == 5.0
 
 
-def test_feature_names_count_is_18():
-    assert len(FEATURE_NAMES) == 18
+def test_feature_names_count_is_11():
+    assert len(FEATURE_NAMES) == 11
+
+
+def test_feature_names_contain_no_lidar_fields():
+    """No lidar_* features — the entire Phase 9.5 point is RGB-only."""
+    assert not any(name.startswith("lidar_") for name in FEATURE_NAMES)
