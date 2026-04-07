@@ -1,18 +1,23 @@
 ## Current State
 
-Phase: 10a COMPLETE — Confidence sweep × LiDAR filter, F1 jumped 2.34×
-Model:  RF-DETR self-trained, NEW operating point: confidence=0.02 + 9.5a filter
+Phase: 10b COMPLETE — top_k cap is real but NOT binding on class-0 recall
+Model:  RF-DETR self-trained, BEST operating point: confidence=0.02 + 9.5a filter
 Eval:   Honest LiDAR-verified F1 progression (10-patch reference set):
           Phase 8 baseline (raw, conf=0.30):              F1 = 0.108
           Phase 9.5a deterministic filter (conf=0.30):    F1 = 0.127  (+17%)
           Phase 9.5b RGB classifier (refuted):            F1 = 0.103  (-5%)
           Phase 10a NEW BEST (filter, conf=0.02):         F1 = 0.251  (+132%)
-        TPs more than doubled (225 → 505) by lowering RF-DETR confidence
-        from 0.30 → 0.02 and reapplying the 9.5a filter. Zero retraining,
-        zero new code in production modules, single afternoon experiment.
-        New ceiling is bounded by rfdetr top_k=300 cap, not confidence
-        calibration — Phase 10b will raise the cap.
-Next:   Phase 10b — raise rfdetr top_k cap; potentially +0.05 F1 for 30 min
+          Phase 10b (num_select=600 + class filter):      F1 = 0.252  (no change)
+        Phase 10b proved that raising num_select past 300 yields ZERO
+        additional class-0 recall — the top-300 of the available 600
+        (query×class) candidates is already entirely class 0 on every
+        patch. The architectural cap is real (300 queries × 2 classes
+        = 600 hard limit) but it's not binding on the trained head.
+        F1 = 0.252 IS the legitimate ceiling for this checkpoint at
+        640×640 input resolution.
+Next:   Phase 10c — sliced inference (each sub-window gets its own 300
+        queries → 4-9× more candidates per parent patch). The natural
+        next experiment, ~4 hours, expected +0.03-0.10 F1.
 
 ## Completed
 
@@ -163,27 +168,54 @@ Phase 9.5b: RGB-distilled classifier — HYPOTHESIS REFUTED
 
 ## Planned sequence — "detect once, classify many times"
 
-### TODO Phase 10b: Raise rfdetr top_k cap  (30 min — single tweak)
-- [ ] rfdetr predict caps candidates at top_k=300 by default; we hit
-      that cap on every patch at conf=0.01 → it's the binding ceiling
-- [ ] Investigate rfdetr API for raising num_select / top_k
-- [ ] Re-run sweep_confidence.py at top_k=600, 1000
-- [ ] Likely cheap +0.05 F1 → 0.30+, especially on dense canopy
-      patches (0250, 0477, 0278)
-- [ ] If rfdetr API doesn't expose the cap, monkey-patch
-      RFDETRBase or fork — both acceptable for an experiment
+### Phase 10b: Raise rfdetr top_k cap — TESTED, DEAD END
+- [x] rfdetr architecture: pred_logits is [B, 300, 2] → 300 queries
+      × 2 classes = 600 (query, class) candidates max. num_select=1000
+      raises RuntimeError from torch.topk.
+- [x] Modified scripts/sweep_confidence.py to support --num-select INT
+      and --class-zero-only flags. Default behavior unchanged.
+- [x] Ran the full sweep at num_select=600 (with and without class
+      filter) — F1 IDENTICAL to Phase 10a in every row.
+- [x] Reason: the trained class (0) dominates every query, so the
+      top-300 of the 600-candidate pool is ALWAYS entirely class 0.
+      The 300 extra slots at num_select=600 fill exclusively with
+      class-1 noise from an untrained head, which (a) sits below the
+      0.01 confidence floor, (b) gets dropped by the 9.5a filter.
+- [x] CONFIRMED: Phase 10a's F1 = 0.252 IS the legitimate ceiling
+      for this RF-DETR checkpoint on 640x640 input. There is no
+      hidden recall available via the topk lever.
+- [x] See .claude/runs/confidence-sweep-recall-experiment/RESULTS-phase10b.md
+- [x] Lesson learned: a saturation cap is only meaningful if it's
+      binding on the SIGNAL, not just on the raw count. Always check
+      the class/category distribution of the topk before assuming the
+      cap is the bottleneck.
 
-### TODO Phase 10c: Sliced inference  (4 hours, only if 10b plateaus)
-- [ ] Wrap detect_trees with supervision.InferenceSlicer
-- [ ] 9 overlapping 320×320 sub-windows per 640×640 patch
-- [ ] Each sub-window gets its own top_k=300 → effectively 9× the
-      cap if 10b can't get past 300 directly
-- [ ] NMS-merge across sub-window seams
-- [ ] Re-run sweep at the new operating point
+### TODO Phase 10c: Sliced inference  (4 hours — NEXT, only viable lever)
+- [ ] Phase 10b proved the rfdetr 300-query cap IS binding per-call
+      and there's no way to raise it without retraining. The natural
+      next experiment is to call the model more times on smaller
+      crops. Each sub-window gets its own 300 queries → effectively
+      4-9× more candidates per parent patch.
+- [ ] Wrap detect_trees with supervision.InferenceSlicer (or write
+      a simple grid-then-NMS wrapper). Prior art exists in
+      scripts/bootstrap_annotations.py from Phase 3.
+- [ ] Try 4× overlapping 400×400 sub-windows (50% overlap)
+- [ ] Try 9× overlapping 320×320 sub-windows (33% overlap)
+- [ ] NMS-merge across sub-window seams at IoU 0.5
+- [ ] Re-run sweep_confidence.py against the sliced detector
+- [ ] Risks: detection cost ~4-9× per patch (~0.3-0.6s vs 0.07s);
+      cross-seam duplicates need NMS; the model was trained on full
+      640×640 images so smaller crops put it in a different
+      resolution regime than training. Mitigation: NMS handles dups;
+      smaller crops actually GROW objects relative to the receptive
+      field, which usually HELPS DETR-family small-object detection.
+- [ ] Expected lift: +0.03-0.10 F1, biggest on dense-canopy patches
+      (0250.jpg, 0477.jpg, 0278.jpg) where the 300-query cap is
+      most-binding via Phase 10b's failure to help
 
-### TODO Phase 10d: Production wiring  (1-2 hours, after 10b/c)
+### TODO Phase 10d: Production wiring  (1-2 hours, after 10c)
 - [ ] full_pipeline_demo.py — apply confidence=0.02 + 9.5a filter
-      (or whatever 10b/c best operating point is) as the production
+      (or whatever 10c best operating point is) as the production
       stage in Catalunya runs
 - [ ] CLI flag to opt out for non-LiDAR settings
 - [ ] Build a multi-patch batch driver: scripts/inventory_montseny.py
@@ -191,6 +223,7 @@ Phase 9.5b: RGB-distilled classifier — HYPOTHESIS REFUTED
       produce ONE Montseny-wide GeoJSON
 - [ ] Per-zone summary CSV
 - [ ] Log per-stage counts
+
 
 ### TODO Phase 11: Recall fundamentals  (DEFERRED — Phase 10a bought breathing room)
 - [ ] Phase 10a pushed recall from 0.068 → 0.153 cheaply. Phase 11

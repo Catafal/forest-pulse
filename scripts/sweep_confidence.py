@@ -60,7 +60,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "autoresearch"))
 
 from eval_lidar import evaluate_patches_against_lidar  # noqa: E402
 
-from forest_pulse.detect import detect_trees  # noqa: E402
+from forest_pulse.detect import _MODEL_CACHE, detect_trees  # noqa: E402
 from forest_pulse.lidar import (  # noqa: E402
     _strip_rfdetr_metadata,
     fetch_laz_for_patch,
@@ -92,6 +92,13 @@ CONFIDENCE_LEVELS: list[float] = [0.30, 0.20, 0.10, 0.05, 0.02, 0.01]
 # equal min(CONFIDENCE_LEVELS).
 MIN_DETECTION_CONF: float = 0.01
 
+# rfdetr's PostProcess.num_select default. The model architecture has
+# 300 queries × 2 classes = 600 candidates max — see Phase 10b note.
+# Setting this above 600 raises `RuntimeError: selected index k out of
+# range` from torch.topk.
+DEFAULT_NUM_SELECT: int = 300
+MAX_NUM_SELECT: int = 600
+
 
 def _get_patch_center(patch_name: str) -> tuple[float, float]:
     """Look up the geographic center of a patch from the metadata CSV."""
@@ -102,7 +109,38 @@ def _get_patch_center(patch_name: str) -> tuple[float, float]:
     raise ValueError(f"Patch {patch_name} not found in {METADATA_CSV}")
 
 
-def _build_low_conf_record(patch_name: str, checkpoint: str) -> dict | None:
+def _set_num_select(checkpoint: str, num_select: int) -> None:
+    """Mutate the cached rfdetr model's PostProcess.num_select.
+
+    rfdetr's predict pipeline applies `torch.topk(prob.view(B, -1),
+    num_select)` over the (queries × classes) flattened tensor. The
+    architecture caps this at `num_queries × num_classes` (300 × 2
+    = 600 for our checkpoint). Setting num_select above MAX_NUM_SELECT
+    raises a RuntimeError from torch.topk.
+
+    Phase 10b finding (see RESULTS-phase10b.md): the trained class
+    dominates every query, so num_select=300 already returns every
+    class-0 candidate. The 218 extra detections at num_select=600 are
+    untrained class-1 noise that does NOT improve recall. This setter
+    is kept for the Phase 10b experiment and reproducibility.
+    """
+    if num_select > MAX_NUM_SELECT:
+        raise ValueError(
+            f"num_select={num_select} exceeds the architectural cap "
+            f"of {MAX_NUM_SELECT} (= 300 queries × 2 classes). "
+            f"torch.topk would raise RuntimeError."
+        )
+    model = _MODEL_CACHE.get(checkpoint)
+    if model is None:
+        return  # not yet loaded — first detect call will set it later
+    model.model.postprocess.num_select = num_select
+
+
+def _build_low_conf_record(
+    patch_name: str,
+    checkpoint: str,
+    num_select: int,
+) -> dict | None:
     """Run detect_trees ONCE at the minimum threshold per patch.
 
     Returns a record containing the patch geometry, the LAZ tile path,
@@ -123,9 +161,19 @@ def _build_low_conf_record(patch_name: str, checkpoint: str) -> dict | None:
     image_size = (PATCH_SIZE_PX, PATCH_SIZE_PX)
 
     image = np.array(Image.open(patch_path).convert("RGB"))
+    # First call may load the model; subsequent calls reuse the cache.
     detections = detect_trees(
         image, model_name=checkpoint, confidence=MIN_DETECTION_CONF,
     )
+    # If num_select differs from the rfdetr default of 300, mutate the
+    # cached model and re-run. (We can't pass num_select through the
+    # detect_trees signature without invasive changes to the production
+    # module — and Phase 10a/10b is purely an inference-time experiment.)
+    if num_select != DEFAULT_NUM_SELECT:
+        _set_num_select(checkpoint, num_select)
+        detections = detect_trees(
+            image, model_name=checkpoint, confidence=MIN_DETECTION_CONF,
+        )
     # Strip rfdetr's source_shape / source_image keys NOW so every
     # subsequent boolean slice is safe.
     _strip_rfdetr_metadata(detections)
@@ -147,15 +195,24 @@ def _build_low_conf_record(patch_name: str, checkpoint: str) -> dict | None:
 def _subset_by_confidence(
     detections: sv.Detections,
     threshold: float,
+    class_zero_only: bool = False,
 ) -> sv.Detections:
     """Return the subset of detections at or above the given confidence.
 
     Pre-stripped detections (rfdetr metadata removed at build time) so
     boolean slicing is safe.
+
+    If `class_zero_only` is True, ALSO drop any detection whose
+    `class_id` is not 0 (the trained tree class). Used in the Phase
+    10b experiment to isolate the effect of raising num_select beyond
+    300 — without this filter, untrained class-1 noise pollutes the
+    superset.
     """
     if len(detections) == 0 or detections.confidence is None:
         return detections
     mask = detections.confidence >= threshold
+    if class_zero_only and detections.class_id is not None:
+        mask = mask & (detections.class_id == 0)
     return detections[mask]
 
 
@@ -163,11 +220,13 @@ def _build_eval_records(
     low_conf_records: list[dict],
     threshold: float,
     mode: str,
+    class_zero_only: bool = False,
 ) -> list[dict]:
     """Shape per-patch records for `evaluate_patches_against_lidar`.
 
     For each low-conf record:
-      1. Sub-filter detections to `confidence >= threshold`.
+      1. Sub-filter detections to `confidence >= threshold` (and
+         optionally class_id == 0 for the Phase 10b experiment).
       2. If mode == 'filter', apply `lidar_tree_top_filter`.
       3. Wrap into the dict shape the eval expects.
     """
@@ -175,6 +234,7 @@ def _build_eval_records(
     for rec in low_conf_records:
         subset = _subset_by_confidence(
             rec["detections_low_conf"], threshold,
+            class_zero_only=class_zero_only,
         )
         if mode == "filter":
             subset = lidar_tree_top_filter(
@@ -193,7 +253,12 @@ def _build_eval_records(
     return eval_records
 
 
-def run_sweep(patches: list[str], checkpoint: str) -> list[dict]:
+def run_sweep(
+    patches: list[str],
+    checkpoint: str,
+    num_select: int = DEFAULT_NUM_SELECT,
+    class_zero_only: bool = False,
+) -> list[dict]:
     """Top-level orchestration. Returns the list of result rows."""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -201,7 +266,9 @@ def run_sweep(patches: list[str], checkpoint: str) -> list[dict]:
         f"Confidence sweep on {len(patches)} patches × "
         f"{len(CONFIDENCE_LEVELS)} thresholds × 2 modes"
     )
-    print(f"Checkpoint: {checkpoint}")
+    print(f"Checkpoint:      {checkpoint}")
+    print(f"num_select:      {num_select}  (rfdetr default = 300, max = 600)")
+    print(f"class_zero_only: {class_zero_only}")
     print(f"Detection threshold (single call per patch): {MIN_DETECTION_CONF}")
     print()
 
@@ -209,7 +276,7 @@ def run_sweep(patches: list[str], checkpoint: str) -> list[dict]:
     low_conf_records: list[dict] = []
     for i, name in enumerate(patches, start=1):
         t0 = time.perf_counter()
-        rec = _build_low_conf_record(name, checkpoint)
+        rec = _build_low_conf_record(name, checkpoint, num_select)
         elapsed = time.perf_counter() - t0
         if rec is None:
             continue
@@ -235,9 +302,12 @@ def run_sweep(patches: list[str], checkpoint: str) -> list[dict]:
         for threshold in CONFIDENCE_LEVELS:
             eval_records = _build_eval_records(
                 low_conf_records, threshold, mode,
+                class_zero_only=class_zero_only,
             )
             aggregate, _ = evaluate_patches_against_lidar(eval_records)
             row = {
+                "num_select": num_select,
+                "class_zero_only": class_zero_only,
                 "mode": mode,
                 "confidence": threshold,
                 "n_pred": aggregate.n_predictions,
@@ -251,8 +321,10 @@ def run_sweep(patches: list[str], checkpoint: str) -> list[dict]:
             }
             rows.append(row)
             logger.info(
-                "mode=%s conf=%.2f → pred=%d TP=%d P=%.3f R=%.3f F1=%.4f",
-                mode, threshold, row["n_pred"], row["n_tp"],
+                "ns=%d c0=%s mode=%s conf=%.2f → pred=%d TP=%d "
+                "P=%.3f R=%.3f F1=%.4f",
+                num_select, class_zero_only, mode, threshold,
+                row["n_pred"], row["n_tp"],
                 row["precision"], row["recall"], row["f1"],
             )
 
@@ -296,12 +368,18 @@ def _print_table(rows: list[dict]) -> None:
 
 
 def _save_csv(rows: list[dict], path: Path) -> None:
-    """Save the sweep results as CSV."""
+    """Save the sweep results as CSV.
+
+    Columns include num_select + class_zero_only so Phase 10b rows
+    can coexist with Phase 10a rows in the same file when the sweeps
+    are concatenated externally.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(
             f,
             fieldnames=[
+                "num_select", "class_zero_only",
                 "mode", "confidence", "n_pred", "n_truth",
                 "n_tp", "n_fp", "n_fn",
                 "precision", "recall", "f1",
@@ -336,7 +414,7 @@ def main():
         format="%(name)s | %(levelname)s | %(message)s",
     )
     parser = argparse.ArgumentParser(
-        description="Phase 10a: confidence × LiDAR-filter sweep.",
+        description="Phase 10a/10b: confidence × LiDAR-filter sweep.",
     )
     parser.add_argument(
         "--patch", action="append", default=None,
@@ -350,16 +428,46 @@ def main():
         default=str(DEFAULT_CHECKPOINT),
         help="Path to RF-DETR checkpoint.",
     )
+    parser.add_argument(
+        "--num-select", type=int, default=DEFAULT_NUM_SELECT,
+        help=(
+            "rfdetr PostProcess.num_select. Default 300 reproduces "
+            "Phase 10a. Max 600 (architectural cap = 300 queries × "
+            "2 classes). Phase 10b: try 600 with --class-zero-only."
+        ),
+    )
+    parser.add_argument(
+        "--class-zero-only", action="store_true",
+        help=(
+            "Drop detections whose class_id is not 0 (the trained "
+            "tree class). Use with --num-select 600 to isolate the "
+            "effect of raising the topk cap from class-1 noise."
+        ),
+    )
+    parser.add_argument(
+        "--output-suffix", default=None,
+        help=(
+            "Optional suffix appended to the output CSV/MD filenames "
+            "(e.g. 'phase10b_ns600_c0'). Defaults to bare names that "
+            "overwrite Phase 10a outputs."
+        ),
+    )
     args = parser.parse_args()
 
     patches = args.patch if args.patch else DEFAULT_PATCHES
-    rows = run_sweep(patches, args.checkpoint)
+    rows = run_sweep(
+        patches, args.checkpoint,
+        num_select=args.num_select,
+        class_zero_only=args.class_zero_only,
+    )
     if not rows:
         return
 
     _print_table(rows)
-    _save_csv(rows, OUTPUT_DIR / "confidence_sweep.csv")
-    _save_markdown(rows, OUTPUT_DIR / "confidence_sweep.md")
+
+    suffix = f"_{args.output_suffix}" if args.output_suffix else ""
+    _save_csv(rows, OUTPUT_DIR / f"confidence_sweep{suffix}.csv")
+    _save_markdown(rows, OUTPUT_DIR / f"confidence_sweep{suffix}.md")
 
 
 if __name__ == "__main__":
