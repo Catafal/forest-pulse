@@ -41,7 +41,10 @@ sys.path.insert(0, str(PROJECT_ROOT / "autoresearch"))
 from eval_lidar import evaluate_patches_against_lidar  # noqa: E402
 
 from forest_pulse.detect import detect_trees  # noqa: E402
-from forest_pulse.lidar import fetch_laz_for_patch  # noqa: E402
+from forest_pulse.lidar import (  # noqa: E402
+    fetch_laz_for_patch,
+    lidar_tree_top_filter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -107,12 +110,25 @@ def _build_patch_record(patch_name: str, checkpoint: str) -> dict | None:
     }
 
 
-def run_evaluation(patches: list[str], checkpoint: str) -> None:
-    """Build records for each patch and run the LiDAR evaluator."""
+def run_evaluation(
+    patches: list[str],
+    checkpoint: str,
+    mode: str = "baseline",
+) -> None:
+    """Build records for each patch and run the LiDAR evaluator.
+
+    Args:
+        patches: Patch filenames to evaluate.
+        checkpoint: RF-DETR checkpoint path.
+        mode: One of "baseline" (no post-processing), "filter" (apply
+            lidar_tree_top_filter before eval). Phase 9.5b will add
+            "classifier" as a third mode.
+    """
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     print(f"Running LiDAR-verified evaluation on {len(patches)} patches...")
     print(f"Checkpoint: {checkpoint}")
+    print(f"Mode: {mode}")
     print()
 
     records = []
@@ -122,11 +138,30 @@ def run_evaluation(patches: list[str], checkpoint: str) -> None:
         elapsed = time.perf_counter() - t0
         if rec is None:
             continue
-        n_dets = len(rec["detections"])
-        print(
-            f"  [{i}/{len(patches)}] {name} — {n_dets} detections "
-            f"({elapsed:.1f}s)"
-        )
+
+        # Phase 9.5a: deterministic LiDAR tree-top filter. Runs on the
+        # same CHM the eval will compute a moment later, so the cost
+        # is essentially a single extra numpy distance computation.
+        if mode == "filter":
+            n_before = len(rec["detections"])
+            rec["detections"] = lidar_tree_top_filter(
+                rec["detections"],
+                rec["image_bounds"],
+                rec["image_size_px"],
+                rec["laz_path"],
+            )
+            n_after = len(rec["detections"])
+            print(
+                f"  [{i}/{len(patches)}] {name} — "
+                f"{n_before} → {n_after} detections after filter "
+                f"({elapsed:.1f}s)"
+            )
+        else:
+            n_dets = len(rec["detections"])
+            print(
+                f"  [{i}/{len(patches)}] {name} — {n_dets} detections "
+                f"({elapsed:.1f}s)"
+            )
         records.append(rec)
 
     if not records:
@@ -168,8 +203,13 @@ def run_evaluation(patches: list[str], checkpoint: str) -> None:
     print(f"  Honest baseline F1: {aggregate.f1:.4f}")
     print("  Compare to inflated mAP50: 0.904 (self-trained labels)")
 
-    # Save CSV
-    csv_path = OUTPUT_DIR / "eval_summary.csv"
+    # Save CSV — one file per mode so the three modes (baseline,
+    # filter, classifier) can coexist without clobbering each other.
+    csv_name = (
+        "eval_summary.csv" if mode == "baseline"
+        else f"eval_summary_{mode}.csv"
+    )
+    csv_path = OUTPUT_DIR / csv_name
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(
             f,
@@ -217,10 +257,20 @@ def main():
         default=str(DEFAULT_CHECKPOINT),
         help="Path to RF-DETR checkpoint.",
     )
+    parser.add_argument(
+        "--filter",
+        action="store_true",
+        help=(
+            "Apply the deterministic LiDAR tree-top filter "
+            "(lidar_tree_top_filter) before eval. Produces the "
+            "reference upper bound for any post-processor."
+        ),
+    )
     args = parser.parse_args()
 
     patches = args.patch if args.patch else DEFAULT_PATCHES
-    run_evaluation(patches, args.checkpoint)
+    mode = "filter" if args.filter else "baseline"
+    run_evaluation(patches, args.checkpoint, mode=mode)
 
 
 if __name__ == "__main__":

@@ -68,6 +68,7 @@ import rasterio
 import supervision as sv
 from rasterio.transform import from_origin
 from rasterio.windows import from_bounds
+from scipy.ndimage import gaussian_filter, maximum_filter
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,26 @@ ASPRS_HIGH_VEGETATION = 5
 # Default CHM rasterization resolution. 0.5 m is a good trade-off between
 # detail and memory for a 160 m patch (320×320 cells per patch).
 DEFAULT_CHM_RESOLUTION_M = 0.5
+
+# ============================================================
+# Tree-top detection + deterministic filter defaults (Phase 9.5a)
+# ============================================================
+#
+# These constants were previously defined in autoresearch/eval_lidar.py;
+# they now live here because the same detection + filter logic is
+# reused at runtime (not just at eval time). eval_lidar.py re-imports
+# them for back-compat.
+#
+# All four are forestry conventions, not knobs to tune:
+#   - 5 m height threshold: Spanish Forest Inventory tree cutoff.
+#   - 3 m min_distance: roughly half a typical Mediterranean crown.
+#   - 1 px smoothing sigma: kills CHM speckle without merging crowns.
+#   - 2 m match tolerance: matches Phase 8 eval convention + the
+#     training-time positive label threshold in classifier.py.
+DEFAULT_TREE_TOP_HEIGHT_M = 5.0
+DEFAULT_TREE_TOP_MIN_DISTANCE_M = 3.0
+DEFAULT_TREE_TOP_SMOOTH_SIGMA_PX = 1.0
+DEFAULT_TREE_TOP_TOLERANCE_M = 2.0
 
 # ICGC LAZ endpoint + URL pattern (verified live 2026-04).
 ICGC_LAZ_BASE = (
@@ -344,6 +365,204 @@ def extract_lidar_features(
         features = _features_from_points(points, geo_box, tree_id=i)
         out.append(features)
     return out
+
+
+# ============================================================
+# Public API — tree-top detection + deterministic filter (Phase 9.5a)
+# ============================================================
+#
+# `find_tree_tops_from_chm` and `lidar_tree_top_filter` implement the
+# Phase 8 standard forestry technique (smoothed local-max filtering on
+# a CHM above a height threshold). They now live in forest_pulse
+# because they are runtime capabilities, not eval-only.
+# autoresearch/eval_lidar.py re-imports `find_tree_tops_from_chm` for
+# back-compat so existing tests and callers keep working.
+
+
+def find_tree_tops_from_chm(
+    chm: np.ndarray,
+    transform: "rasterio.Affine",
+    min_height_m: float = DEFAULT_TREE_TOP_HEIGHT_M,
+    min_distance_m: float = DEFAULT_TREE_TOP_MIN_DISTANCE_M,
+    smooth_sigma_px: float = DEFAULT_TREE_TOP_SMOOTH_SIGMA_PX,
+    return_heights: bool = False,
+):
+    """Find tree-top WORLD positions via local-max filtering on a CHM.
+
+    Standard forestry technique (same approach as lidR `locate_trees`,
+    USFS workflows, and the Spanish Forest Inventory):
+
+      1. Replace non-finite CHM values with 0 so they never become peaks.
+      2. Smooth the CHM with a small Gaussian to suppress speckle.
+      3. Apply a maximum_filter over a window sized to half a typical
+         crown diameter. Pixels equal to the local max are candidates.
+      4. Drop candidates below the height threshold (these are shrubs).
+      5. Convert remaining peak pixel positions to world coords via
+         the affine transform.
+
+    Args:
+        chm: 2D float array of canopy heights (meters). NaN/Inf → 0.
+        transform: rasterio Affine pixel→world transform.
+        min_height_m: Drop peaks below this. Default 5 m.
+        min_distance_m: Window radius in meters. Default 3 m = half
+            typical Mediterranean crown.
+        smooth_sigma_px: Gaussian sigma in PIXELS. Default 1.
+        return_heights: If True, return a 2-tuple
+            `(positions, heights)`. The heights list is parallel to
+            positions and reports the smoothed CHM value at the peak
+            (the value that passed `>= min_height_m`), so downstream
+            height filters stay consistent. Default False preserves
+            the original single-return signature.
+
+    Returns:
+        List of `(world_x, world_y)` tuples. If `return_heights=True`,
+        a tuple `(positions, heights)` where `heights` is a list of
+        floats parallel to positions. Empty CHM or no peaks → empty.
+    """
+    if chm.size == 0:
+        return ([], []) if return_heights else []
+
+    # Replace any non-finite values with 0 so they never become peaks.
+    safe = np.where(np.isfinite(chm), chm, 0.0).astype(np.float32)
+
+    # Light smoothing — kills single-pixel speckle without flattening
+    # real crown structure.
+    smoothed = gaussian_filter(safe, sigma=smooth_sigma_px)
+
+    # Window radius in pixels from meters via the transform's
+    # x-resolution (affine.a). Fall back to 0.5 m if no transform.
+    pixel_size_m = abs(transform.a) if transform is not None else 0.5
+    window_radius_px = max(1, int(round(min_distance_m / pixel_size_m)))
+    window_size = 2 * window_radius_px + 1
+
+    local_max = maximum_filter(smoothed, size=window_size)
+    is_peak = (smoothed == local_max) & (smoothed >= min_height_m)
+
+    rows, cols = np.where(is_peak)
+    if rows.size == 0:
+        return ([], []) if return_heights else []
+
+    # Convert pixel (col, row) → world (x, y) via the affine transform.
+    # Use the pixel CENTER (+ 0.5 offset) to match rasterio convention.
+    positions: list[tuple[float, float]] = []
+    heights: list[float] = []
+    for r, c in zip(rows, cols):
+        x_world, y_world = transform * (c + 0.5, r + 0.5)
+        positions.append((float(x_world), float(y_world)))
+        if return_heights:
+            # Use the smoothed value because that's what was tested
+            # against min_height_m — keeps downstream height filters
+            # strictly consistent with the peak-finding logic.
+            heights.append(float(smoothed[r, c]))
+
+    logger.debug(
+        "find_tree_tops: %d peaks above %.1f m (window=%dpx)",
+        len(positions), min_height_m, window_size,
+    )
+    if return_heights:
+        return positions, heights
+    return positions
+
+
+def bbox_centers_to_world(
+    detections: sv.Detections,
+    image_bounds: tuple[float, float, float, float],
+    image_size_px: tuple[int, int],
+) -> np.ndarray:
+    """Convert detection bbox centers from pixel → world coordinates.
+
+    Returns an (N, 2) float64 array of `(x_world, y_world)` rows, in
+    the same order as `detections.xyxy`. The Y axis is inverted (image
+    row 0 is the TOP of the image, which maps to `y_max` in world
+    coords) — this matches the convention used elsewhere in the
+    pipeline (ndvi.py, georef.py, _pixel_bbox_to_geo).
+
+    Strips rfdetr metadata before iterating so callers never hit the
+    source_shape/source_image indexing gotcha.
+
+    Args:
+        detections: sv.Detections with xyxy in pixel coords.
+        image_bounds: (x_min, y_min, x_max, y_max) in world meters.
+        image_size_px: (width, height) of the image in pixels.
+
+    Returns:
+        (N, 2) float64 ndarray of world (x, y) centers. Empty
+        detections → zero-row array.
+    """
+    if len(detections) == 0:
+        return np.zeros((0, 2), dtype=np.float64)
+
+    _strip_rfdetr_metadata(detections)
+
+    x_min_geo, y_min_geo, x_max_geo, y_max_geo = image_bounds
+    w_px, h_px = image_size_px
+    x_scale = (x_max_geo - x_min_geo) / w_px
+    y_scale = (y_max_geo - y_min_geo) / h_px
+
+    xyxy = np.asarray(detections.xyxy, dtype=np.float64)
+    cx_px = (xyxy[:, 0] + xyxy[:, 2]) * 0.5
+    cy_px = (xyxy[:, 1] + xyxy[:, 3]) * 0.5
+
+    cx_world = x_min_geo + cx_px * x_scale
+    cy_world = y_max_geo - cy_px * y_scale   # invert Y
+
+    return np.stack([cx_world, cy_world], axis=1)
+
+
+def lidar_tree_top_filter(
+    detections: sv.Detections,
+    image_bounds: tuple[float, float, float, float],
+    image_size_px: tuple[int, int],
+    laz_path: Path,
+    tolerance_m: float = DEFAULT_TREE_TOP_TOLERANCE_M,
+    min_height_m: float = DEFAULT_TREE_TOP_HEIGHT_M,
+    chm_resolution_m: float = DEFAULT_CHM_RESOLUTION_M,
+) -> sv.Detections:
+    """Drop detections with no LiDAR tree-top within tolerance_m.
+
+    Deterministic post-detector precision filter. For each detection:
+    if the bbox CENTER has no LiDAR tree-top (peak of the smoothed CHM
+    at >= min_height_m) within tolerance_m, drop it. Otherwise keep it.
+
+    This is the reference bound for any post-processor: every kept
+    detection is matched to a tree-top by construction, so precision
+    against the Phase 8 LiDAR eval is 1.000 within rounding. Recall
+    cannot be improved by any post-filter.
+
+    Skips the LAZ → CHM pipeline entirely on empty detections (saves
+    ~5s per patch call).
+
+    Args:
+        detections: RF-DETR output (sv.Detections with pixel xyxy).
+        image_bounds: (x_min, y_min, x_max, y_max) in EPSG:25831.
+        image_size_px: (width, height) in pixels.
+        laz_path: Cached LAZ tile covering the patch area.
+        tolerance_m: Maximum distance to a tree-top for a keep.
+            Default 2 m matches Phase 8 eval convention.
+        min_height_m: Minimum CHM peak height for a tree-top to count.
+            Default 5 m (Spanish Forest Inventory tree cutoff).
+        chm_resolution_m: CHM grid resolution. Default 0.5 m.
+
+    Returns:
+        Filtered sv.Detections — a subset of the input.
+    """
+    if len(detections) == 0:
+        return detections
+
+    chm_path = compute_chm_from_laz(
+        laz_path, image_bounds, resolution_m=chm_resolution_m,
+    )
+    chm, transform = _read_chm_raster(chm_path)
+
+    return _filter_from_chm(
+        detections=detections,
+        image_bounds=image_bounds,
+        image_size_px=image_size_px,
+        chm=chm,
+        transform=transform,
+        tolerance_m=tolerance_m,
+        min_height_m=min_height_m,
+    )
 
 
 # ============================================================
@@ -668,6 +887,75 @@ def _pixel_bbox_to_geo(
     y_max = y_max_geo - y1_px * y_scale
     y_min = y_max_geo - y2_px * y_scale
     return (x_min, y_min, x_max, y_max)
+
+
+def _read_chm_raster(chm_path: Path) -> tuple[np.ndarray, "rasterio.Affine"]:
+    """Load a CHM GeoTIFF + its affine transform.
+
+    Tiny helper used by `lidar_tree_top_filter` (Phase 9.5a) and by
+    `scripts/train_classifier.py` when it needs per-patch tree-top
+    positions for label derivation. `autoresearch/eval_lidar.py`
+    re-imports this as `_read_chm_array` for back-compat.
+    """
+    with rasterio.open(chm_path) as src:
+        return src.read(1), src.transform
+
+
+def _filter_from_chm(
+    detections: sv.Detections,
+    image_bounds: tuple[float, float, float, float],
+    image_size_px: tuple[int, int],
+    chm: np.ndarray,
+    transform: "rasterio.Affine",
+    tolerance_m: float,
+    min_height_m: float,
+) -> sv.Detections:
+    """Core of `lidar_tree_top_filter` — operates on a pre-loaded CHM.
+
+    Exposed as a private seam so unit tests can exercise the filter
+    logic with synthetic CHM arrays without going through
+    `compute_chm_from_laz` (which requires a real LAZ file).
+
+    Algorithm:
+      1. Find LiDAR tree-top world positions via find_tree_tops_from_chm.
+      2. If no tree-tops → drop everything.
+      3. Compute world centers of all detection bboxes.
+      4. For each detection, find the nearest tree-top distance.
+      5. Keep detections whose nearest distance <= tolerance_m.
+    """
+    if len(detections) == 0:
+        return detections
+
+    _strip_rfdetr_metadata(detections)
+
+    tree_tops = find_tree_tops_from_chm(
+        chm, transform, min_height_m=min_height_m,
+    )
+    if not tree_tops:
+        # No eligible LiDAR peaks in this patch → drop all detections.
+        # Use boolean mask so supervision's slicing stays consistent.
+        return detections[np.zeros(len(detections), dtype=bool)]
+
+    centers = bbox_centers_to_world(detections, image_bounds, image_size_px)
+    tops_arr = np.asarray(tree_tops, dtype=np.float64)
+
+    # Squared-distance matrix: (N_det, N_tops). We only need the
+    # minimum per detection, so squared distance is enough.
+    dx = centers[:, 0:1] - tops_arr[:, 0]
+    dy = centers[:, 1:2] - tops_arr[:, 1]
+    d_sq = dx * dx + dy * dy
+    nearest_sq = d_sq.min(axis=1)
+
+    tol_sq = tolerance_m * tolerance_m
+    keep_mask = nearest_sq <= tol_sq
+
+    n_kept = int(keep_mask.sum())
+    logger.info(
+        "LiDAR tree-top filter: kept %d/%d detections "
+        "(%d tree-tops, tol=%.1fm, min_height=%.1fm)",
+        n_kept, len(detections), len(tree_tops), tolerance_m, min_height_m,
+    )
+    return detections[keep_mask]
 
 
 def _sample_raster_agg(

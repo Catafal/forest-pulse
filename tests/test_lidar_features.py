@@ -17,12 +17,15 @@ from forest_pulse.lidar import (
     LiDARFeatures,
     _bounds_key,
     _features_from_points,
+    _filter_from_chm,
     _icgc_laz_url,
     _LAZPoints,
     _points_inside_bounds,
     _rasterize_cells,
+    bbox_centers_to_world,
     compute_chm_from_laz,
     extract_lidar_features,
+    find_tree_tops_from_chm,
 )
 
 
@@ -320,3 +323,170 @@ def test_lidar_features_defaults():
     assert f.tree_id == 5
     assert f.height_p95_m == 0.0
     assert f.point_count == 0
+
+
+# ============================================================
+# Phase 9.5a — tree-top detection + bbox_centers + deterministic filter
+# ============================================================
+
+
+def _identity_transform(resolution_m: float = 0.5):
+    """Tiny rasterio.Affine with pixel (col,row) → world (col*res, row*res).
+
+    Y is NOT inverted in this test transform so the assertions stay
+    readable. `a` is the x-resolution which find_tree_tops uses to
+    size the local-max window.
+    """
+    from rasterio.transform import Affine
+    return Affine(resolution_m, 0.0, 0.0, 0.0, resolution_m, 0.0)
+
+
+# --- find_tree_tops_from_chm with return_heights ---
+
+def test_find_tree_tops_returns_heights_when_requested():
+    """return_heights=True → parallel heights list; default preserves
+    old single-return signature (back-compat guarantee).
+
+    Uses a 5x5 plateau at 15 m so the Gaussian smoothing (sigma=1 px)
+    preserves the peak value — a single-pixel peak would get smeared
+    below the 5 m threshold and we'd find nothing.
+    """
+    chm = np.zeros((20, 20), dtype=np.float32)
+    chm[8:13, 8:13] = 15.0  # 5x5 plateau, peak at center (10, 10)
+    transform = _identity_transform(0.5)
+
+    # Old signature: list of positions only
+    positions_only = find_tree_tops_from_chm(chm, transform, min_height_m=5.0)
+    assert isinstance(positions_only, list)
+    assert len(positions_only) == 1
+
+    # New signature with heights
+    positions, heights = find_tree_tops_from_chm(
+        chm, transform, min_height_m=5.0, return_heights=True,
+    )
+    assert len(positions) == 1
+    assert len(heights) == 1
+    # Smoothed value at the peak should be well above threshold
+    assert heights[0] >= 5.0
+
+
+def test_find_tree_tops_empty_chm_with_return_heights():
+    """Empty CHM → ([], []) when return_heights=True (not a plain list)."""
+    result = find_tree_tops_from_chm(
+        np.zeros((0, 0), dtype=np.float32),
+        _identity_transform(),
+        return_heights=True,
+    )
+    assert result == ([], [])
+
+
+# --- bbox_centers_to_world ---
+
+def test_bbox_centers_to_world_known_bounds():
+    """Centered bbox in a 640x640 image with bounds (0,0,160,160)."""
+    dets = sv.Detections(
+        xyxy=np.array([[0, 0, 640, 640]], dtype=np.float32),
+        confidence=np.array([0.9], dtype=np.float32),
+    )
+    centers = bbox_centers_to_world(dets, (0.0, 0.0, 160.0, 160.0), (640, 640))
+    assert centers.shape == (1, 2)
+    # bbox covers whole image → center in world = (80, 80)
+    assert abs(centers[0, 0] - 80.0) < 1e-6
+    assert abs(centers[0, 1] - 80.0) < 1e-6
+
+
+def test_bbox_centers_to_world_y_is_flipped():
+    """Row 0 in image-space maps to y_max in world-space (Y inverted)."""
+    # Pixel center at (320, 0) → world should be (80, 160) NOT (80, 0).
+    dets = sv.Detections(
+        xyxy=np.array([[310, 0, 330, 0]], dtype=np.float32),
+        confidence=np.array([0.5], dtype=np.float32),
+    )
+    centers = bbox_centers_to_world(dets, (0.0, 0.0, 160.0, 160.0), (640, 640))
+    assert abs(centers[0, 0] - 80.0) < 1e-6
+    assert abs(centers[0, 1] - 160.0) < 1e-6  # row 0 → y_max
+
+
+def test_bbox_centers_to_world_empty_detections():
+    """Empty sv.Detections → zero-row ndarray, no crash."""
+    centers = bbox_centers_to_world(
+        sv.Detections.empty(), (0.0, 0.0, 100.0, 100.0), (100, 100),
+    )
+    assert centers.shape == (0, 2)
+
+
+# --- _filter_from_chm (the test seam for lidar_tree_top_filter) ---
+
+def test_filter_from_chm_empty_detections_passthrough():
+    """Empty detections in → empty out, regardless of CHM."""
+    chm = np.full((20, 20), 15.0, dtype=np.float32)
+    out = _filter_from_chm(
+        detections=sv.Detections.empty(),
+        image_bounds=(0.0, 0.0, 10.0, 10.0),
+        image_size_px=(100, 100),
+        chm=chm,
+        transform=_identity_transform(0.5),
+        tolerance_m=2.0,
+        min_height_m=5.0,
+    )
+    assert len(out) == 0
+
+
+def test_filter_from_chm_no_tree_tops_drops_everything():
+    """CHM below threshold everywhere → every detection dropped."""
+    # All-zero CHM → no peaks above 5 m
+    chm = np.zeros((20, 20), dtype=np.float32)
+    dets = sv.Detections(
+        xyxy=np.array([[0, 0, 50, 50], [50, 50, 100, 100]], dtype=np.float32),
+        confidence=np.array([0.9, 0.8], dtype=np.float32),
+    )
+    out = _filter_from_chm(
+        detections=dets,
+        image_bounds=(0.0, 0.0, 10.0, 10.0),
+        image_size_px=(100, 100),
+        chm=chm,
+        transform=_identity_transform(0.5),
+        tolerance_m=2.0,
+        min_height_m=5.0,
+    )
+    assert len(out) == 0
+
+
+def test_filter_from_chm_keeps_matching_drops_far():
+    """Two detections: one over a CHM peak, one far from any peak.
+
+    Setup: 20x20 CHM at 0.5 m/px → 10m x 10m patch. Single peak at
+    (col=10, row=10) which maps to world (5, 5) with this non-
+    Y-inverted identity transform. image_bounds match the patch so
+    bbox-center→world also lives in [0, 10].
+    """
+    chm = np.zeros((20, 20), dtype=np.float32)
+    chm[8:13, 8:13] = 15.0  # 5x5 plateau (survives sigma=1 smoothing)
+
+    # Image is 100 px covering (0,0)-(10,10) → 0.1 m/px.
+    # Detection A bbox center at pixel (50, 50) → world (5, 5) ≈ peak.
+    # Detection B bbox center at pixel (90, 90) → world (9, 1) which is
+    # far from the peak at (5, 5) (distance ≈ 5.66 m, well > tolerance).
+    # Note: Y is inverted for bbox_centers_to_world (row 0 → y_max=10),
+    # so pixel (50, 50) → world (5, 5) and pixel (90, 90) → world (9, 1).
+    dets = sv.Detections(
+        xyxy=np.array([
+            [48, 48, 52, 52],    # center (50, 50)
+            [88, 88, 92, 92],    # center (90, 90)
+        ], dtype=np.float32),
+        confidence=np.array([0.9, 0.8], dtype=np.float32),
+    )
+
+    out = _filter_from_chm(
+        detections=dets,
+        image_bounds=(0.0, 0.0, 10.0, 10.0),
+        image_size_px=(100, 100),
+        chm=chm,
+        transform=_identity_transform(0.5),
+        tolerance_m=2.0,
+        min_height_m=5.0,
+    )
+    # Only the matching detection should survive.
+    assert len(out) == 1
+    # The survivor should be the first detection (tightest match)
+    assert out.confidence[0] == 0.9

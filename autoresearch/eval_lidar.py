@@ -40,14 +40,16 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import numpy as np
-import rasterio
 import supervision as sv
-from scipy.ndimage import gaussian_filter, maximum_filter
 
-from forest_pulse.lidar import compute_chm_from_laz
+from forest_pulse.lidar import _read_chm_raster as _read_chm_array  # back-compat alias
+from forest_pulse.lidar import (
+    bbox_centers_to_world,
+    compute_chm_from_laz,
+    find_tree_tops_from_chm,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -129,80 +131,6 @@ class EvalResult:
 # ============================================================
 # Public API
 # ============================================================
-
-
-def find_tree_tops_from_chm(
-    chm: np.ndarray,
-    transform: Any,
-    min_height_m: float = DEFAULT_HEIGHT_THRESHOLD_M,
-    min_distance_m: float = DEFAULT_MIN_DISTANCE_M,
-    smooth_sigma_px: float = DEFAULT_SMOOTH_SIGMA_PX,
-) -> list[tuple[float, float]]:
-    """Find tree-top WORLD positions via local-max filtering on a CHM.
-
-    Standard forestry technique:
-      1. Smooth the CHM with a small Gaussian to suppress speckle.
-      2. Apply a maximum_filter with a window matching half the typical
-         crown radius — pixels where smoothed value equals the local
-         max are candidate peaks.
-      3. Drop peaks below the height threshold (these are bushes).
-      4. Convert pixel positions to world coordinates via the raster
-         transform.
-
-    Args:
-        chm: 2D numpy array of canopy heights in meters. NaN/Inf treated
-            as zero (background) so they never produce false peaks.
-        transform: Affine transform from rasterio (pixel→world). Used
-            to convert pixel positions back to CRS coordinates.
-        min_height_m: Drop peaks below this. Default 5 m (= shrub cutoff).
-        min_distance_m: Window radius for the local-max filter. Default
-            3 m matches half a typical Mediterranean tree crown.
-        smooth_sigma_px: Gaussian smoothing sigma in PIXELS. Default 1
-            kills speckle without merging adjacent crowns.
-
-    Returns:
-        List of (world_x, world_y) tuples in the same CRS as the
-        transform. Empty if no peaks found.
-    """
-    if chm.size == 0:
-        return []
-
-    # Replace any non-finite values with 0 so they never become peaks.
-    safe = np.where(np.isfinite(chm), chm, 0.0).astype(np.float32)
-
-    # Light smoothing — suppresses single-pixel CHM speckle from sparse
-    # LiDAR returns without flattening real crown structure.
-    smoothed = gaussian_filter(safe, sigma=smooth_sigma_px)
-
-    # Window size for the local-max filter. We want a square window of
-    # diameter ~= 2 × min_distance_m, in pixels. We need the resolution
-    # in meters/pixel from the transform — affine.a is the x-resolution.
-    pixel_size_m = abs(transform.a) if transform is not None else 0.5
-    window_radius_px = max(1, int(round(min_distance_m / pixel_size_m)))
-    window_size = 2 * window_radius_px + 1
-
-    # Local maximum filter: each pixel becomes the max in a window
-    # around it. A pixel is a local max if its smoothed value equals
-    # this local-max value.
-    local_max = maximum_filter(smoothed, size=window_size)
-    is_peak = (smoothed == local_max) & (smoothed >= min_height_m)
-
-    rows, cols = np.where(is_peak)
-    if rows.size == 0:
-        return []
-
-    # Convert pixel (col, row) → world (x, y) via the affine transform.
-    # rasterio.transform supports (col + 0.5, row + 0.5) for pixel center.
-    world_positions: list[tuple[float, float]] = []
-    for r, c in zip(rows, cols):
-        x_world, y_world = transform * (c + 0.5, r + 0.5)
-        world_positions.append((float(x_world), float(y_world)))
-
-    logger.debug(
-        "find_tree_tops: %d peaks above %.1f m (window=%dpx)",
-        len(world_positions), min_height_m, window_size,
-    )
-    return world_positions
 
 
 def match_predictions_to_truth(
@@ -405,34 +333,17 @@ def _detection_centers_world(
     image_bounds: tuple[float, float, float, float],
     image_size_px: tuple[int, int],
 ) -> list[tuple[float, float]]:
-    """Convert each detection's bbox CENTER from pixel → world coordinates.
+    """Back-compat wrapper around `forest_pulse.lidar.bbox_centers_to_world`.
 
-    Same Y-inversion convention as ndvi.py / lidar.py / georef.py:
-    image row 0 is the top, which maps to the geographic y_max.
+    Kept as a thin shim because `tests/test_eval_lidar.py` imports
+    this private name directly. The real implementation lives in
+    forest_pulse.lidar now. Returns the same list[(x,y)] shape as
+    before so existing callers see no behavior change.
     """
     if len(detections) == 0:
         return []
-
-    x_min_geo, y_min_geo, x_max_geo, y_max_geo = image_bounds
-    w_px, h_px = image_size_px
-    x_scale = (x_max_geo - x_min_geo) / w_px
-    y_scale = (y_max_geo - y_min_geo) / h_px
-
-    centers: list[tuple[float, float]] = []
-    for xyxy in detections.xyxy:
-        x1, y1, x2, y2 = xyxy.tolist()
-        cx_px = (x1 + x2) / 2.0
-        cy_px = (y1 + y2) / 2.0
-        cx_world = x_min_geo + cx_px * x_scale
-        cy_world = y_max_geo - cy_px * y_scale  # invert Y
-        centers.append((cx_world, cy_world))
-    return centers
-
-
-def _read_chm_array(chm_path: Path) -> tuple[np.ndarray, Any]:
-    """Load a CHM GeoTIFF + transform from disk."""
-    with rasterio.open(chm_path) as src:
-        return src.read(1), src.transform
+    centers = bbox_centers_to_world(detections, image_bounds, image_size_px)
+    return [(float(row[0]), float(row[1])) for row in centers]
 
 
 def _strip_rfdetr_metadata(detections: sv.Detections) -> None:
