@@ -1,23 +1,26 @@
 ## Current State
 
-Phase: 10b COMPLETE — top_k cap is real but NOT binding on class-0 recall
-Model:  RF-DETR self-trained, BEST operating point: confidence=0.02 + 9.5a filter
+Phase: 10c COMPLETE — Sliced inference ALMOST DOUBLED F1 over 10a
+Model:  RF-DETR + detect_trees_sliced (9× 320×320 tiles, 50% overlap)
 Eval:   Honest LiDAR-verified F1 progression (10-patch reference set):
           Phase 8 baseline (raw, conf=0.30):              F1 = 0.108
           Phase 9.5a deterministic filter (conf=0.30):    F1 = 0.127  (+17%)
           Phase 9.5b RGB classifier (refuted):            F1 = 0.103  (-5%)
-          Phase 10a NEW BEST (filter, conf=0.02):         F1 = 0.251  (+132%)
-          Phase 10b (num_select=600 + class filter):      F1 = 0.252  (no change)
-        Phase 10b proved that raising num_select past 300 yields ZERO
-        additional class-0 recall — the top-300 of the available 600
-        (query×class) candidates is already entirely class 0 on every
-        patch. The architectural cap is real (300 queries × 2 classes
-        = 600 hard limit) but it's not binding on the trained head.
-        F1 = 0.252 IS the legitimate ceiling for this checkpoint at
-        640×640 input resolution.
-Next:   Phase 10c — sliced inference (each sub-window gets its own 300
-        queries → 4-9× more candidates per parent patch). The natural
-        next experiment, ~4 hours, expected +0.03-0.10 F1.
+          Phase 10a (filter, conf=0.02):                  F1 = 0.251  (+132%)
+          Phase 10b (num_select=600):                     F1 = 0.252  (no change)
+          Phase 10c 4-tile slicing (filter, conf=0.01):   F1 = 0.479  (+343%)
+          Phase 10c NEW BEST 9-tile slicing:              F1 = 0.487  (+351%)
+        Detector now finds 1356 of 3320 LiDAR-verified trees (vs 225
+        at Phase 8 baseline — a 6.0x rescue multiplier). Recall jumped
+        from 6.8% → 40.8%. Phase 10b's "F1 = 0.252 is the legitimate
+        ceiling" was wrong — slicing sidesteps the per-call 300-query
+        cap AND fixes the small-object regime problem at 25 cm/px.
+        The actual ceiling is closer to F1 = 0.58 (arithmetic max at
+        R=0.408 with perfect precision); we're at 0.487 = 84% of that.
+Next:   Phase 10d — wire detect_trees_sliced into full_pipeline_demo.py
+        + build inventory_montseny.py batch driver. Now has a real
+        reason to ship: the headline production number is 4.5× the
+        Phase 8 baseline.
 
 ## Completed
 
@@ -168,6 +171,22 @@ Phase 9.5b: RGB-distilled classifier — HYPOTHESIS REFUTED
 
 ## Planned sequence — "detect once, classify many times"
 
+### Phase 10d: Production wiring  (NEXT — 1-2 hours, real reason to ship now)
+- [ ] full_pipeline_demo.py — use detect_trees_sliced +
+      lidar_tree_top_filter + conf=0.01 as the production Catalunya
+      pipeline. Add --slice-size CLI flag to opt into non-sliced
+      mode for non-Catalunya regions.
+- [ ] scripts/inventory_montseny.py — NEW batch driver. Loop all
+      800 patches with the new operating point, dedupe overlapping
+      detections via gpd.sjoin_nearest, write ONE Montseny-wide
+      GeoJSON + per-zone summary CSV.
+- [ ] Expected runtime: 800 patches × 0.5s/patch = 7 minutes
+      on MPS. Acceptable for a one-shot park-wide inventory.
+- [ ] Consolidate duplicate _get_patch_center helpers across
+      scripts into forest_pulse.metadata or similar.
+- [ ] Update full_pipeline_demo docstring to reflect the honest
+      F1 = 0.487 number.
+
 ### Phase 10b: Raise rfdetr top_k cap — TESTED, DEAD END
 - [x] rfdetr architecture: pred_logits is [B, 300, 2] → 300 queries
       × 2 classes = 600 (query, class) candidates max. num_select=1000
@@ -190,28 +209,39 @@ Phase 9.5b: RGB-distilled classifier — HYPOTHESIS REFUTED
       the class/category distribution of the topk before assuming the
       cap is the bottleneck.
 
-### TODO Phase 10c: Sliced inference  (4 hours — NEXT, only viable lever)
-- [ ] Phase 10b proved the rfdetr 300-query cap IS binding per-call
-      and there's no way to raise it without retraining. The natural
-      next experiment is to call the model more times on smaller
-      crops. Each sub-window gets its own 300 queries → effectively
-      4-9× more candidates per parent patch.
-- [ ] Wrap detect_trees with supervision.InferenceSlicer (or write
-      a simple grid-then-NMS wrapper). Prior art exists in
-      scripts/bootstrap_annotations.py from Phase 3.
-- [ ] Try 4× overlapping 400×400 sub-windows (50% overlap)
-- [ ] Try 9× overlapping 320×320 sub-windows (33% overlap)
-- [ ] NMS-merge across sub-window seams at IoU 0.5
-- [ ] Re-run sweep_confidence.py against the sliced detector
-- [ ] Risks: detection cost ~4-9× per patch (~0.3-0.6s vs 0.07s);
-      cross-seam duplicates need NMS; the model was trained on full
-      640×640 images so smaller crops put it in a different
-      resolution regime than training. Mitigation: NMS handles dups;
-      smaller crops actually GROW objects relative to the receptive
-      field, which usually HELPS DETR-family small-object detection.
-- [ ] Expected lift: +0.03-0.10 F1, biggest on dense-canopy patches
-      (0250.jpg, 0477.jpg, 0278.jpg) where the 300-query cap is
-      most-binding via Phase 10b's failure to help
+### Phase 10c: Sliced inference — SHIPPED, MASSIVE RESULT
+- [x] Added src/forest_pulse/detect.py::detect_trees_sliced —
+      wraps detect_trees with supervision.InferenceSlicer (NMS-
+      based cross-tile merging). Same public signature pattern
+      as detect_trees, plus slice_wh / overlap_wh / iou_threshold.
+- [x] 7 new unit tests in tests/test_detect_sliced.py — synthetic
+      mock callback, no real weights needed. Tile geometry, NMS,
+      empty cases all covered.
+- [x] Extended sweep_confidence.py with --slice-size / --slice-overlap
+      / --iou-threshold flags. Default unchanged (non-sliced path
+      reproduces Phase 10a exactly, verified byte-identical).
+- [x] Ran full sweep × 3 configurations:
+        no slice:        F1 = 0.2524 (Phase 10a reference)
+        4× 400px tiles:  F1 = 0.4788  (+0.23 vs 10a)
+        9× 320px tiles:  F1 = 0.4872  (+0.24 vs 10a)  ← BEST
+- [x] 9-tile slicing rescues 1356 / 3320 truth trees (vs 508 at
+      Phase 10a) — a 2.7× TP improvement from slicing alone.
+      Recall 15.3% → 40.8%. Precision 0.72 → 0.60 (minor drop,
+      9.5a filter still carries most of the load).
+- [x] Detection cost per patch: 0.5s (vs 0.07s non-sliced). Full
+      sweep runs in ~30s. Fine for production.
+- [x] Phase 10b's "F1 = 0.252 is the legitimate ceiling" was WRONG.
+      The per-call 300-query cap wasn't the bottleneck — effective
+      resolution at 25 cm/px was. Smaller crops put each crown
+      into a better receptive-field regime (each crown goes from
+      ~40 px to ~80 px in the model's internal representation).
+- [x] Meta-lesson documented: "cap is binding" ≠ "signal is limited."
+      Phase 10b proved the first, Phase 10c disproved the second.
+      Always distinguish query-capacity saturation from
+      input-resolution bottlenecks — the interventions differ.
+- [x] See .claude/runs/sliced-inference-recall-experiment/RESULTS.md
+      for full tables and first-principles explanation.
+- [x] 139/139 tests passing, ruff clean
 
 ### TODO Phase 10d: Production wiring  (1-2 hours, after 10c)
 - [ ] full_pipeline_demo.py — apply confidence=0.02 + 9.5a filter

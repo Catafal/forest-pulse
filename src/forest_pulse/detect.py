@@ -5,6 +5,9 @@ Supports:
   - DeepForest pretrained (RetinaNet backbone) — quick demo, American forests
   - RF-DETR pretrained (DINOv2 backbone) — SOTA, no fine-tuning
   - RF-DETR from checkpoint — fine-tuned on your own data (the goal)
+  - Sliced inference (`detect_trees_sliced`) — Phase 10c, sidesteps
+    rfdetr's per-call 300-query cap by running on overlapping
+    sub-windows and merging with NMS
 """
 
 from __future__ import annotations
@@ -74,6 +77,118 @@ def detect_trees(
     logger.info(
         "Detected %d trees in %.2fs (confidence >= %.2f)",
         len(detections), elapsed, confidence,
+    )
+    return detections
+
+
+# --- Sliced inference (Phase 10c) ---
+
+
+def detect_trees_sliced(
+    image: np.ndarray | str | Path,
+    model_name: str,
+    confidence: float = 0.3,
+    slice_wh: int | tuple[int, int] = 320,
+    overlap_wh: int | tuple[int, int] = 160,
+    iou_threshold: float = 0.5,
+) -> sv.Detections:
+    """Run detect_trees on overlapping sub-windows and merge with NMS.
+
+    Sidesteps rfdetr's per-call 300-query cap (Phase 10b finding) by
+    invoking the detector once per tile. Each tile gets its own 300
+    object queries, so an N-tile slice yields up to N * 300 effective
+    candidates per parent image.
+
+    Tiles overlap so that any tree straddling a tile boundary is
+    fully visible in at least one tile; cross-tile duplicate
+    detections (boundary trees seen by multiple tiles) are removed
+    with non-max suppression at `iou_threshold`. The supervision
+    library's InferenceSlicer handles the grid geometry and
+    coordinate translation — returned detections are in the
+    ORIGINAL image's pixel frame.
+
+    Args:
+        image: RGB image as a numpy array (H, W, 3) or path to an
+            image file. Mirrors `detect_trees`.
+        model_name: Detection model identifier — same values as
+            `detect_trees`: 'deepforest', 'rfdetr-base',
+            'rfdetr-large', or a path to a .pt/.pth checkpoint.
+        confidence: Per-tile minimum confidence threshold. Applied
+            BEFORE cross-tile NMS. Phase 10a's operating point is
+            0.02 with the 9.5a filter; the sliced regime may prefer
+            a different threshold.
+        slice_wh: Tile dimensions in pixels. Accepts an int for
+            square tiles or a (width, height) tuple. Default 320.
+            Must be smaller than the input image in each dimension.
+        overlap_wh: Overlap in pixels between adjacent tiles. Must
+            be large enough to fully contain the largest object at
+            any tile boundary — at 25 cm/px, a 10-15 m Mediterranean
+            tree crown is ~40-60 pixels, so 160 px is a safe default
+            for 320-px tiles (50% overlap).
+        iou_threshold: NMS threshold for cross-tile duplicates.
+            Default 0.5. Tune higher (e.g. 0.7) if precision in
+            dense canopy suffers from over-merging.
+
+    Returns:
+        sv.Detections in the original image coordinate frame.
+        Empty input produces an empty Detections (no crash).
+    """
+    # Load image from path if needed — same idiom as detect_trees.
+    if isinstance(image, (str, Path)):
+        image_path = Path(image)
+        if not image_path.exists():
+            raise FileNotFoundError(f"Image not found: {image_path}")
+        image = np.array(Image.open(image_path).convert("RGB"))
+
+    if image.size == 0:
+        return sv.Detections.empty()
+
+    # Normalize slice/overlap to the supervision InferenceSlicer
+    # format (tuple[int, int]).
+    if isinstance(slice_wh, int):
+        slice_wh = (slice_wh, slice_wh)
+    if isinstance(overlap_wh, int):
+        overlap_wh = (overlap_wh, overlap_wh)
+
+    def _slice_callback(image_slice: np.ndarray) -> sv.Detections:
+        """Per-tile callback for InferenceSlicer.
+
+        Resolves `detect_trees` via the module namespace at call
+        time so unit tests can monkeypatch it cleanly. Strips
+        rfdetr's non-per-detection metadata keys
+        (`source_shape`, `source_image`) so supervision's
+        cross-tile concatenation doesn't crash on mismatched
+        lengths.
+        """
+        dets = detect_trees(
+            image_slice, model_name=model_name, confidence=confidence,
+        )
+        # The rfdetr gotcha: these keys are per-image metadata, not
+        # per-detection, and break sv.Detections.merge when their
+        # length doesn't match n_detections across tiles.
+        if hasattr(dets, "data"):
+            for key in ("source_shape", "source_image"):
+                if key in dets.data:
+                    del dets.data[key]
+        return dets
+
+    slicer = sv.InferenceSlicer(
+        callback=_slice_callback,
+        slice_wh=slice_wh,
+        overlap_wh=overlap_wh,
+        overlap_filter=sv.OverlapFilter.NON_MAX_SUPPRESSION,
+        iou_threshold=iou_threshold,
+    )
+
+    start = time.perf_counter()
+    detections = slicer(image)
+    elapsed = time.perf_counter() - start
+
+    logger.info(
+        "Sliced detect: %d detections in %.2fs "
+        "(slice=%s, overlap=%s, conf>=%.2f, iou<=%.2f)",
+        len(detections), elapsed, slice_wh, overlap_wh,
+        confidence, iou_threshold,
     )
     return detections
 

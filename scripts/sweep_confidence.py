@@ -60,7 +60,11 @@ sys.path.insert(0, str(PROJECT_ROOT / "autoresearch"))
 
 from eval_lidar import evaluate_patches_against_lidar  # noqa: E402
 
-from forest_pulse.detect import _MODEL_CACHE, detect_trees  # noqa: E402
+from forest_pulse.detect import (  # noqa: E402
+    _MODEL_CACHE,
+    detect_trees,
+    detect_trees_sliced,
+)
 from forest_pulse.lidar import (  # noqa: E402
     _strip_rfdetr_metadata,
     fetch_laz_for_patch,
@@ -140,8 +144,15 @@ def _build_low_conf_record(
     patch_name: str,
     checkpoint: str,
     num_select: int,
+    slice_wh: int | None = None,
+    overlap_wh: int | None = None,
+    iou_threshold: float = 0.5,
 ) -> dict | None:
-    """Run detect_trees ONCE at the minimum threshold per patch.
+    """Run detection ONCE at the minimum threshold per patch.
+
+    When `slice_wh` is None (default), uses the full-patch detector
+    (Phase 10a/10b behavior). When set, routes through
+    `detect_trees_sliced` — Phase 10c's sliced-inference regime.
 
     Returns a record containing the patch geometry, the LAZ tile path,
     and the low-confidence detections superset. Subsequent threshold
@@ -161,21 +172,39 @@ def _build_low_conf_record(
     image_size = (PATCH_SIZE_PX, PATCH_SIZE_PX)
 
     image = np.array(Image.open(patch_path).convert("RGB"))
-    # First call may load the model; subsequent calls reuse the cache.
-    detections = detect_trees(
-        image, model_name=checkpoint, confidence=MIN_DETECTION_CONF,
-    )
-    # If num_select differs from the rfdetr default of 300, mutate the
-    # cached model and re-run. (We can't pass num_select through the
-    # detect_trees signature without invasive changes to the production
-    # module — and Phase 10a/10b is purely an inference-time experiment.)
-    if num_select != DEFAULT_NUM_SELECT:
-        _set_num_select(checkpoint, num_select)
+
+    if slice_wh is None:
+        # Phase 10a / 10b path: full-patch detection once per patch.
         detections = detect_trees(
             image, model_name=checkpoint, confidence=MIN_DETECTION_CONF,
         )
+        if num_select != DEFAULT_NUM_SELECT:
+            # Phase 10b: mutate the cached model's num_select and
+            # re-run. Cannot pass through detect_trees' signature
+            # without invasive changes to the production module.
+            _set_num_select(checkpoint, num_select)
+            detections = detect_trees(
+                image, model_name=checkpoint,
+                confidence=MIN_DETECTION_CONF,
+            )
+    else:
+        # Phase 10c path: sliced inference. Each tile is its own
+        # detect_trees call with its own 300 queries. NMS handles
+        # cross-tile duplicates at iou_threshold.
+        eff_overlap = overlap_wh if overlap_wh is not None else slice_wh // 2
+        detections = detect_trees_sliced(
+            image,
+            model_name=checkpoint,
+            confidence=MIN_DETECTION_CONF,
+            slice_wh=slice_wh,
+            overlap_wh=eff_overlap,
+            iou_threshold=iou_threshold,
+        )
+
     # Strip rfdetr's source_shape / source_image keys NOW so every
-    # subsequent boolean slice is safe.
+    # subsequent boolean slice is safe. (Sliced mode already strips
+    # per-tile, but the merged detections may still carry residual
+    # metadata depending on supervision's merge semantics.)
     _strip_rfdetr_metadata(detections)
 
     # LAZ tile that contains this patch — already cached from prior
@@ -258,6 +287,9 @@ def run_sweep(
     checkpoint: str,
     num_select: int = DEFAULT_NUM_SELECT,
     class_zero_only: bool = False,
+    slice_wh: int | None = None,
+    overlap_wh: int | None = None,
+    iou_threshold: float = 0.5,
 ) -> list[dict]:
     """Top-level orchestration. Returns the list of result rows."""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -269,6 +301,12 @@ def run_sweep(
     print(f"Checkpoint:      {checkpoint}")
     print(f"num_select:      {num_select}  (rfdetr default = 300, max = 600)")
     print(f"class_zero_only: {class_zero_only}")
+    if slice_wh is not None:
+        eff_overlap = overlap_wh if overlap_wh is not None else slice_wh // 2
+        print(
+            f"SLICED inference: slice_wh={slice_wh}, "
+            f"overlap_wh={eff_overlap}, iou_threshold={iou_threshold}"
+        )
     print(f"Detection threshold (single call per patch): {MIN_DETECTION_CONF}")
     print()
 
@@ -276,7 +314,12 @@ def run_sweep(
     low_conf_records: list[dict] = []
     for i, name in enumerate(patches, start=1):
         t0 = time.perf_counter()
-        rec = _build_low_conf_record(name, checkpoint, num_select)
+        rec = _build_low_conf_record(
+            name, checkpoint, num_select,
+            slice_wh=slice_wh,
+            overlap_wh=overlap_wh,
+            iou_threshold=iou_threshold,
+        )
         elapsed = time.perf_counter() - t0
         if rec is None:
             continue
@@ -452,6 +495,29 @@ def main():
             "overwrite Phase 10a outputs."
         ),
     )
+    parser.add_argument(
+        "--slice-size", type=int, default=None,
+        help=(
+            "Phase 10c: route detection through detect_trees_sliced "
+            "with this tile size (pixels). Default None reproduces "
+            "Phase 10a's full-patch path exactly. Typical values: "
+            "400 (→ 2x2 grid on 640px input) or 320 (→ 3x3 grid)."
+        ),
+    )
+    parser.add_argument(
+        "--slice-overlap", type=int, default=None,
+        help=(
+            "Overlap in pixels between adjacent tiles. Default = "
+            "slice_size // 2 (50%% overlap)."
+        ),
+    )
+    parser.add_argument(
+        "--iou-threshold", type=float, default=0.5,
+        help=(
+            "NMS IoU threshold for cross-tile duplicate removal "
+            "when --slice-size is set. Default 0.5."
+        ),
+    )
     args = parser.parse_args()
 
     patches = args.patch if args.patch else DEFAULT_PATCHES
@@ -459,6 +525,9 @@ def main():
         patches, args.checkpoint,
         num_select=args.num_select,
         class_zero_only=args.class_zero_only,
+        slice_wh=args.slice_size,
+        overlap_wh=args.slice_overlap,
+        iou_threshold=args.iou_threshold,
     )
     if not rows:
         return
