@@ -12,8 +12,17 @@ Handles platform-specific quirks:
 from __future__ import annotations
 
 import logging
+import os
 
-import torch
+# Enable silent CPU fallback for ops not yet supported on Apple MPS.
+# SAM2 uses a couple of ops (bicubic upsample, one grid_sampler_2d path)
+# that aren't on MPS — without this the ops error out instead of
+# transparently running on CPU. Must be set BEFORE torch is imported
+# anywhere in the process; setting it here (the only module that touches
+# torch at import time) guarantees that.
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
+import torch  # noqa: E402 — env var must be set before import
 
 logger = logging.getLogger(__name__)
 

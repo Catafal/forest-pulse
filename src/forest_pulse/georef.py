@@ -87,6 +87,12 @@ def georeference(
         logger.info("georeference: empty detections → empty GeoDataFrame")
         return _empty_gdf(columns, crs)
 
+    # If masks are present, we compute crown_area_m2 from the actual
+    # mask pixel count × meters²/pixel — much more accurate than the
+    # rectangular bbox area (which over-estimates by including gaps).
+    has_masks = detections.mask is not None
+    px_area_m2 = _compute_pixel_area_m2(image_bounds, image_size_px)
+
     rows = []
     geoms = []
     for i, xyxy in enumerate(detections.xyxy):
@@ -97,6 +103,13 @@ def georeference(
         width_m = g_xmax - g_xmin
         height_m = g_ymax - g_ymin
         center = Point((g_xmin + g_xmax) / 2.0, (g_ymin + g_ymax) / 2.0)
+
+        # Crown area: mask-derived when available, else rectangular bbox
+        if has_masks:
+            mask_px = int(detections.mask[i].sum())
+            crown_area = mask_px * px_area_m2
+        else:
+            crown_area = width_m * height_m
 
         # Confidence may be None if the model didn't provide it; default to 0.
         conf = float(detections.confidence[i]) if detections.confidence is not None else 0.0
@@ -110,7 +123,7 @@ def georeference(
             "bbox_ymax": round(g_ymax, 2),
             "crown_width_m": round(width_m, 2),
             "crown_height_m": round(height_m, 2),
-            "crown_area_m2": round(width_m * height_m, 2),
+            "crown_area_m2": round(crown_area, 2),
         }
 
         if health_scores is not None:
@@ -170,6 +183,23 @@ def _pixel_bbox_to_geo(
     y_max = y_max_geo - y1_px * y_scale   # image top → world top
     y_min = y_max_geo - y2_px * y_scale   # image bottom → world bottom
     return (x_min, y_min, x_max, y_max)
+
+
+def _compute_pixel_area_m2(
+    image_bounds: tuple[float, float, float, float],
+    image_size_px: tuple[int, int],
+) -> float:
+    """Compute the area of a single pixel in square meters.
+
+    Used when we have pixel masks and want mask_area * px_area_m²
+    instead of the rectangular bbox area. Only meaningful when the CRS
+    is projected (e.g. EPSG:25831 — metric units).
+    """
+    x_min, y_min, x_max, y_max = image_bounds
+    w_px, h_px = image_size_px
+    x_m_per_px = (x_max - x_min) / w_px
+    y_m_per_px = (y_max - y_min) / h_px
+    return x_m_per_px * y_m_per_px
 
 
 def _empty_gdf(columns: list[str], crs: str) -> gpd.GeoDataFrame:

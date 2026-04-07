@@ -48,15 +48,21 @@ class HealthScore:
 def score_health(
     image: np.ndarray,
     detections: sv.Detections,
+    use_masks: bool = False,
 ) -> list[HealthScore]:
     """Compute RGB health indices for each detected tree crown.
 
-    For each bounding box in detections, crops the tree crown from the image
-    and computes GRVI and ExG vegetation indices to classify health status.
+    For each detection, computes GRVI and ExG vegetation indices on the
+    crown pixels and classifies health status.
 
     Args:
         image: Full RGB image as numpy array (H, W, 3), uint8.
         detections: Supervision Detections with xyxy bounding boxes.
+        use_masks: If True and detections have a .mask field (e.g. from
+            SAM2 refinement), compute indices only on mask pixels — this
+            excludes background gaps inside the bounding box and gives
+            more accurate GRVI/ExG values. Default False to preserve
+            backward compatibility with bbox-only detections.
 
     Returns:
         List of HealthScore, one per detected tree, in same order as detections.
@@ -66,20 +72,33 @@ def score_health(
         logger.info("No detections to score — returning empty health list")
         return []
 
+    # Only use mask path if requested AND masks are actually present.
+    # This lets callers pass use_masks=True unconditionally without
+    # worrying about whether segmentation was run.
+    masks_available = use_masks and detections.mask is not None
+
     scores = []
     for i, xyxy in enumerate(detections.xyxy):
-        crop = _crop_detection(image, xyxy)
+        if masks_available:
+            grvi, exg, too_small = _indices_from_mask(image, detections.mask[i])
+        else:
+            crop = _crop_detection(image, xyxy)
+            too_small = (
+                crop.shape[0] < MIN_CROP_SIZE or crop.shape[1] < MIN_CROP_SIZE
+            )
+            if too_small:
+                grvi, exg = 0.0, 0.0
+            else:
+                grvi = compute_grvi(crop)
+                exg = compute_exg(crop)
 
-        # Skip crops that are too small for reliable index computation
-        if crop.shape[0] < MIN_CROP_SIZE or crop.shape[1] < MIN_CROP_SIZE:
-            logger.debug("Tree %d: crop too small (%s), marking unknown", i, crop.shape[:2])
+        if too_small:
+            logger.debug("Tree %d: too few pixels, marking unknown", i)
             scores.append(HealthScore(
                 tree_id=i, grvi=0.0, exg=0.0, label="unknown", confidence=0.0,
             ))
             continue
 
-        grvi = compute_grvi(crop)
-        exg = compute_exg(crop)
         label, conf = classify_health(grvi, exg)
         scores.append(HealthScore(tree_id=i, grvi=grvi, exg=exg, label=label, confidence=conf))
 
@@ -166,6 +185,43 @@ def classify_health(grvi: float, exg: float) -> tuple[str, float]:
 
     # Middle ground — indices disagree or are borderline
     return ("stressed", 0.5)
+
+
+def _indices_from_mask(
+    image: np.ndarray, mask: np.ndarray,
+) -> tuple[float, float, bool]:
+    """Compute GRVI + ExG using only mask pixels (not the whole bbox).
+
+    When a mask is available (e.g. from SAM2), this gives more accurate
+    vegetation indices because we exclude background pixels (sky gaps,
+    shadows between crowns) that would contaminate a simple bbox crop.
+
+    Args:
+        image: Full RGB image (H, W, 3), uint8.
+        mask: Boolean mask (H, W) selecting the crown pixels.
+
+    Returns:
+        (grvi, exg, too_small). too_small is True when there are fewer
+        than MIN_CROP_SIZE**2 True pixels (not enough signal).
+    """
+    # Extract only the pixels where the mask is True
+    pixels = image[mask]  # shape (N, 3)
+    if pixels.shape[0] < MIN_CROP_SIZE * MIN_CROP_SIZE:
+        return 0.0, 0.0, True
+
+    # float64 prevents uint8 overflow in subtractions
+    r = pixels[:, 0].astype(np.float64)
+    g = pixels[:, 1].astype(np.float64)
+    b = pixels[:, 2].astype(np.float64)
+
+    mean_g = g.mean()
+    mean_r = r.mean()
+    denom = mean_g + mean_r
+    grvi = 0.0 if denom < 1e-6 else float((mean_g - mean_r) / denom)
+
+    exg = float((2.0 * g - r - b).mean())
+
+    return grvi, exg, False
 
 
 def _crop_detection(image: np.ndarray, xyxy: np.ndarray) -> np.ndarray:

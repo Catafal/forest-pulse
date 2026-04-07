@@ -55,7 +55,7 @@ def _get_patch_center(patch_name: str) -> tuple[float, float]:
     raise ValueError(f"Patch {patch_name} not found in {METADATA_CSV}")
 
 
-def run_pipeline(patch_name: str, skip_ndvi: bool) -> None:
+def run_pipeline(patch_name: str, skip_ndvi: bool, use_sam2: bool = False) -> None:
     """Execute the full pipeline on one patch and write GIS outputs."""
     patch_path = PATCH_DIR / patch_name
     if not patch_path.exists():
@@ -72,17 +72,28 @@ def run_pipeline(patch_name: str, skip_ndvi: bool) -> None:
     logger.info("Patch: %s at (%.0f, %.0f) in EPSG:25831",
                 patch_name, x_center, y_center)
 
-    # Stage 1-3: detect → health
+    # Stage 1: detect — RF-DETR alone, or hybrid RF-DETR+SAM2
     image = np.array(Image.open(patch_path).convert("RGB"))
-    detections = detect_trees(
-        image, model_name=str(CHECKPOINT), confidence=0.3,
-    )
+    if use_sam2:
+        # Hybrid: RF-DETR + SAM2 refinement + SAM2 automatic mode for
+        # higher recall in dense canopy. Slower but better for forest
+        # inventory use cases.
+        from forest_pulse.segment import detect_trees_hybrid
+        logger.info("Stage 1 — running hybrid RF-DETR + SAM2 detector")
+        detections = detect_trees_hybrid(
+            image, str(CHECKPOINT), rfdetr_confidence=0.3,
+        )
+    else:
+        detections = detect_trees(
+            image, model_name=str(CHECKPOINT), confidence=0.3,
+        )
     if len(detections) == 0:
         print(f"No trees detected in {patch_name}.")
         return
     logger.info("Stage 1 — detected %d trees", len(detections))
 
-    health = score_health(image, detections)
+    # Stage 2: health — use mask-based crops if SAM2 produced masks
+    health = score_health(image, detections, use_masks=use_sam2)
     logger.info("Stage 2 — scored %d trees", len(health))
 
     # Stage 4: NDVI filter (drops non-vegetation false positives)
@@ -143,8 +154,12 @@ def main():
         "--skip-ndvi", action="store_true",
         help="Skip the NDVI filter stage (useful for offline runs).",
     )
+    parser.add_argument(
+        "--use-sam2", action="store_true",
+        help="Use SAM2 hybrid detector (slower, higher recall on dense canopy).",
+    )
     args = parser.parse_args()
-    run_pipeline(args.patch, args.skip_ndvi)
+    run_pipeline(args.patch, args.skip_ndvi, use_sam2=args.use_sam2)
 
 
 if __name__ == "__main__":
