@@ -1,0 +1,18 @@
+{
+  "slug": "lidar-verified-eval-metric",
+  "created": "2026-04-07T15:00:00Z",
+  "current_phase": "act",
+  "spec_confirmed": "2026-04-07T15:05:00Z",
+  "plan_confirmed": "2026-04-07T15:15:00Z",
+  "plan_iterations": 1,
+  "conditional_skills": [],
+  "pr_number": null,
+  "pr_status": null,
+  "phases_completed": [
+    "describe",
+    "observe",
+    "analyze"
+  ],
+  "skills_invoked": [],
+  "errors": []
+}
