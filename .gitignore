@@ -27,6 +27,7 @@ data/*
 !data/.gitkeep
 !data/montseny/
 data/montseny/raw/               # raw ICGC GeoTIFFs (1.3GB, git-ignored)
+data/montseny/rasters/           # cached NDVI + CHM rasters (per-patch)
 data/montseny/boundary.geojson   # not yet created
 !data/montseny/patches/
 !data/montseny/patches/**
