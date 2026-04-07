@@ -22,6 +22,11 @@ Always present:
 
 If health_scores provided:
   health_label, grvi, exg, health_confidence
+
+If lidar_features provided:
+  lidar_height_p95, lidar_height_p50, lidar_vertical_spread,
+  lidar_point_count, lidar_return_ratio,
+  lidar_intensity_mean, lidar_intensity_std
 """
 
 from __future__ import annotations
@@ -34,6 +39,7 @@ import supervision as sv
 from shapely.geometry import Point
 
 from forest_pulse.health import HealthScore
+from forest_pulse.lidar import LiDARFeatures
 
 logger = logging.getLogger(__name__)
 
@@ -47,12 +53,20 @@ _BASE_COLUMNS = [
 # Extra columns emitted when health_scores are provided.
 _HEALTH_COLUMNS = ["health_label", "grvi", "exg", "health_confidence"]
 
+# Extra columns emitted when lidar_features are provided.
+_LIDAR_COLUMNS = [
+    "lidar_height_p95", "lidar_height_p50", "lidar_vertical_spread",
+    "lidar_point_count", "lidar_return_ratio",
+    "lidar_intensity_mean", "lidar_intensity_std",
+]
+
 
 def georeference(
     detections: sv.Detections,
     image_bounds: tuple[float, float, float, float],
     image_size_px: tuple[int, int],
     health_scores: list[HealthScore] | None = None,
+    lidar_features: list[LiDARFeatures] | None = None,
     crs: str = "EPSG:25831",
 ) -> gpd.GeoDataFrame:
     """Convert pixel-space detections to a GeoDataFrame.
@@ -66,14 +80,18 @@ def georeference(
         health_scores: Optional list of HealthScore objects, one per
             detection, in the same order. When supplied, health columns
             are added to the output.
+        lidar_features: Optional list of LiDARFeatures, one per detection
+            in the same order. When supplied, seven LiDAR columns are
+            added to the output (height_p95/p50, vertical spread, point
+            count, return ratio, intensity mean/std).
         crs: Coordinate reference system of image_bounds. Default is
             EPSG:25831 (ETRS89 / UTM zone 31N, standard for Catalunya).
 
     Returns:
         GeoDataFrame with one row per detection. Point geometry at the
         bbox center, crown dimensions in meters, confidence, tree_id,
-        and — if provided — health fields. Empty input produces an empty
-        GeoDataFrame with the same schema (no crash).
+        and — if provided — health and/or LiDAR fields. Empty input
+        produces an empty GeoDataFrame with the same schema (no crash).
     """
     # rfdetr adds source_shape/source_image to detections.data. These
     # don't align with the number of detections so any pandas/numpy
@@ -81,7 +99,11 @@ def georeference(
     _strip_rfdetr_metadata(detections)
 
     n_dets = len(detections)
-    columns = _BASE_COLUMNS + (_HEALTH_COLUMNS if health_scores is not None else [])
+    columns = list(_BASE_COLUMNS)
+    if health_scores is not None:
+        columns += _HEALTH_COLUMNS
+    if lidar_features is not None:
+        columns += _LIDAR_COLUMNS
 
     if n_dets == 0:
         logger.info("georeference: empty detections → empty GeoDataFrame")
@@ -132,6 +154,22 @@ def georeference(
             row["grvi"] = round(hs.grvi, 4) if hs else 0.0
             row["exg"] = round(hs.exg, 4) if hs else 0.0
             row["health_confidence"] = round(hs.confidence, 4) if hs else 0.0
+
+        if lidar_features is not None:
+            lf = lidar_features[i] if i < len(lidar_features) else None
+            row["lidar_height_p95"] = round(lf.height_p95_m, 2) if lf else 0.0
+            row["lidar_height_p50"] = round(lf.height_p50_m, 2) if lf else 0.0
+            row["lidar_vertical_spread"] = (
+                round(lf.vertical_spread_m, 2) if lf else 0.0
+            )
+            row["lidar_point_count"] = lf.point_count if lf else 0
+            row["lidar_return_ratio"] = round(lf.return_ratio, 4) if lf else 0.0
+            row["lidar_intensity_mean"] = (
+                round(lf.intensity_mean, 2) if lf else 0.0
+            )
+            row["lidar_intensity_std"] = (
+                round(lf.intensity_std, 2) if lf else 0.0
+            )
 
         rows.append(row)
         geoms.append(center)

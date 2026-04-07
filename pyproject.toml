@@ -45,6 +45,9 @@ notebooks = [
     "jupyter>=1.0.0",
     "matplotlib>=3.8.0",
 ]
+lidar = [
+    "laspy[lazrs]>=2.5.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/jordicatafal/forest-pulse"

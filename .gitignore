@@ -22,15 +22,14 @@ env/
 *~
 
 # Data (large files — never commit full datasets)
-# Exception: Montseny patches + annotations ARE committed for replicability
 data/*
 !data/.gitkeep
 !data/montseny/
 data/montseny/raw/               # raw ICGC GeoTIFFs (1.3GB, git-ignored)
 data/montseny/rasters/           # cached NDVI + CHM rasters (per-patch)
+data/montseny/lidar/             # cached ICGC LAZ tiles (~400-700 MB each)
+data/montseny/patches/           # ignoring images/patches
 data/montseny/boundary.geojson   # not yet created
-!data/montseny/patches/
-!data/montseny/patches/**
 !data/montseny/patches_metadata.csv
 !data/montseny/annotations_raw.json
 
@@ -61,3 +60,21 @@ credentials.*
 # Downloaded model weights (large, re-downloaded on first run)
 *.pth
 rf-detr-*.pth
+
+# Images and Media
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.tif
+*.tiff
+*.webp
+
+# Cache & Logs
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+lightning_logs/
+wandb/
+*.log
