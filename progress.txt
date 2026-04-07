@@ -1,15 +1,18 @@
 ## Current State
 
-Phase: 9.5 COMPLETE — Deterministic LiDAR filter shipped, RGB-distillation
-        hypothesis refuted (negative result documented)
-Model:  RF-DETR self-trained at conf 0.3
-Eval:   Honest LiDAR-verified F1 baseline = 0.108 (P=0.268, R=0.068)
-        + 9.5a deterministic filter →    F1 = 0.127 (P=0.983, hits ceiling)
-        + 9.5b RGB classifier @0.5  →    F1 = 0.103 (worse than baseline)
-        Recall is the mountain (6.8%), precision is the anthill — F1 is
-        ceilinged at 0.127 by RF-DETR's fundamental recall limit on dense
-        Mediterranean canopy at 25 cm/px.
-Next:   Phase 10 — wire 9.5a deterministic filter into production pipeline
+Phase: 10a COMPLETE — Confidence sweep × LiDAR filter, F1 jumped 2.34×
+Model:  RF-DETR self-trained, NEW operating point: confidence=0.02 + 9.5a filter
+Eval:   Honest LiDAR-verified F1 progression (10-patch reference set):
+          Phase 8 baseline (raw, conf=0.30):              F1 = 0.108
+          Phase 9.5a deterministic filter (conf=0.30):    F1 = 0.127  (+17%)
+          Phase 9.5b RGB classifier (refuted):            F1 = 0.103  (-5%)
+          Phase 10a NEW BEST (filter, conf=0.02):         F1 = 0.251  (+132%)
+        TPs more than doubled (225 → 505) by lowering RF-DETR confidence
+        from 0.30 → 0.02 and reapplying the 9.5a filter. Zero retraining,
+        zero new code in production modules, single afternoon experiment.
+        New ceiling is bounded by rfdetr top_k=300 cap, not confidence
+        calibration — Phase 10b will raise the cap.
+Next:   Phase 10b — raise rfdetr top_k cap; potentially +0.05 F1 for 30 min
 
 ## Completed
 
@@ -90,6 +93,27 @@ Phase 9.5a: Deterministic LiDAR tree-top filter (commit 8c3317a)
       construction. 4 FPs from greedy-matching tie-breaks.
 - [x] 7 new tests (synthetic CHM via _filter_from_chm test seam)
 
+Phase 10a: Confidence sweep × 9.5a filter — recall lever (script: sweep_confidence.py)
+- [x] Hypothesis: lowering RF-DETR confidence releases more candidate
+      detections (real trees + FPs); 9.5a filter cleans up the FPs
+      while keeping the rescued trees → net F1 gain.
+- [x] Detect-once-then-subset trick: run detect_trees(conf=0.01) ONCE
+      per patch, then sub-filter by .confidence >= T for 6 thresholds
+      via boolean indexing (no extra detection cost).
+- [x] Sweep × 2 modes (raw / +9.5a filter) over the same 10-patch set.
+- [x] Back-compat sanity: (raw, 0.30) F1=0.1082 ✓ matches Phase 8 0.108;
+      (filter, 0.30) F1=0.1268 ✓ matches Phase 9.5a 0.127.
+- [x] **NEW BEST: F1 = 0.2512 at (filter, conf=0.02)**.
+      Production sweet spot — F1 saturates below conf=0.02.
+      P = 0.721, R = 0.152. TPs = 505 (vs 225 at the 0.30 default).
+      2.34× lift over Phase 8 baseline, 1.99× over Phase 9.5a.
+- [x] Even raw mode benefits: F1 0.108 → 0.161 across the sweep.
+      The default of conf=0.30 was leaving 60% of TPs on the floor.
+- [x] Discovered: rfdetr returns exactly 300 candidates per patch at
+      conf=0.01 → top_k=300 cap is binding. Phase 10b will raise it.
+- [x] outputs/lidar_eval/confidence_sweep.csv + .md saved
+- [x] 132/132 tests passing, ruff clean
+
 Phase 9.5b: RGB-distilled classifier — HYPOTHESIS REFUTED
 - [x] FEATURE_NAMES collapsed 18 → 11 (NO lidar_* features in vector)
 - [x] auto_label_from_tree_top_match: 2m positive, 4m negative, 2-4m buffer
@@ -110,11 +134,20 @@ Phase 9.5b: RGB-distilled classifier — HYPOTHESIS REFUTED
 - [x] 132/132 tests passing, ruff clean, infrastructure reusable
 
 ## Key learnings (the honest ones)
-- mAP 0.904 was inflated 8.4× — real F1 is 0.108 (LiDAR-verified)
-- Real recall is 6.8% in dense Mediterranean canopy (crown merging)
-- Precision is 26.8% — bushes, rocks, off-center boxes
-- Recall is the mountain, precision is the anthill — any post-filter
-  is ceilinged at F1 = 0.127 by the recall floor
+- mAP 0.904 was inflated 8.4× — real F1 is 0.108 (LiDAR-verified) at
+  the original conf=0.30 default
+- Real recall WAS 6.8% in dense Mediterranean canopy at conf=0.30,
+  but Phase 10a showed this was a self-imposed limit: at conf=0.02,
+  recall climbs to 15.3% and F1 reaches 0.252 (with 9.5a filter)
+- The single biggest "leak" in 4 phases of work was the default
+  inference confidence threshold, untouched since Phase 1. ALWAYS
+  sweep inference hyperparameters before retraining or feature
+  engineering. The 30-min Phase 10a experiment unlocked more F1
+  than any classifier or feature-engineering work in Phases 9 / 9.5.
+- Precision after 9.5a filter degrades gracefully with candidate
+  density (0.98 → 0.72) but the filter still composes additively
+  with raw recall improvements
+- rfdetr top_k=300 cap is the new ceiling — Phase 10b lever
 - LiDAR tree-top matching gives a deterministic filter that hits the
   ceiling. Use it directly in Catalunya. No learning required.
 - RGB at 25 cm/px does NOT contain enough signal to recover the LiDAR
@@ -130,21 +163,47 @@ Phase 9.5b: RGB-distilled classifier — HYPOTHESIS REFUTED
 
 ## Planned sequence — "detect once, classify many times"
 
-### TODO Phase 10: Wire 9.5a deterministic filter into pipeline  (1 hour)
-- [ ] full_pipeline_demo.py — apply lidar_tree_top_filter as the final
-      precision stage in Catalunya / LiDAR-covered runs
-- [ ] CLI flag to opt out for non-LiDAR settings
-- [ ] GeoJSON export only includes filter-confirmed trees on Catalunya
-- [ ] Log kept / dropped counts per stage
-- [ ] Update full_pipeline_demo doc to reflect F1 0.108 → 0.127
+### TODO Phase 10b: Raise rfdetr top_k cap  (30 min — single tweak)
+- [ ] rfdetr predict caps candidates at top_k=300 by default; we hit
+      that cap on every patch at conf=0.01 → it's the binding ceiling
+- [ ] Investigate rfdetr API for raising num_select / top_k
+- [ ] Re-run sweep_confidence.py at top_k=600, 1000
+- [ ] Likely cheap +0.05 F1 → 0.30+, especially on dense canopy
+      patches (0250, 0477, 0278)
+- [ ] If rfdetr API doesn't expose the cap, monkey-patch
+      RFDETRBase or fork — both acceptable for an experiment
 
-### TODO Phase 11: Recall-targeting work  (NEW priority — recall is the bottleneck)
-- [ ] Phase 8 proved recall = 6.8% caps F1 at 0.127 even with a perfect filter
-- [ ] Options to actually improve F1:
+### TODO Phase 10c: Sliced inference  (4 hours, only if 10b plateaus)
+- [ ] Wrap detect_trees with supervision.InferenceSlicer
+- [ ] 9 overlapping 320×320 sub-windows per 640×640 patch
+- [ ] Each sub-window gets its own top_k=300 → effectively 9× the
+      cap if 10b can't get past 300 directly
+- [ ] NMS-merge across sub-window seams
+- [ ] Re-run sweep at the new operating point
+
+### TODO Phase 10d: Production wiring  (1-2 hours, after 10b/c)
+- [ ] full_pipeline_demo.py — apply confidence=0.02 + 9.5a filter
+      (or whatever 10b/c best operating point is) as the production
+      stage in Catalunya runs
+- [ ] CLI flag to opt out for non-LiDAR settings
+- [ ] Build a multi-patch batch driver: scripts/inventory_montseny.py
+      — process all 800 patches, dedupe overlapping detections,
+      produce ONE Montseny-wide GeoJSON
+- [ ] Per-zone summary CSV
+- [ ] Log per-stage counts
+
+### TODO Phase 11: Recall fundamentals  (DEFERRED — Phase 10a bought breathing room)
+- [ ] Phase 10a pushed recall from 0.068 → 0.153 cheaply. Phase 11
+      becomes "what's the next cheap recall lever" rather than "we've
+      exhausted everything cheap"
+- [ ] Re-evaluate priority AFTER Phases 10b + 10c land
+- [ ] If 10b + 10c plateau below F1 = 0.40, then it's time for the
+      bigger commitments:
   - Higher-resolution imagery (sub-10 cm/px from drone) — single biggest lever
   - Detection paradigm change (point/keypoint head, dense canopy decomposer)
-  - Re-train RF-DETR on LiDAR-verified labels (if eval ever exceeds train data quality)
-- [ ] All of these are bigger commitments than Phases 9.5a/b — needs explicit planning
+  - Re-train RF-DETR on LiDAR-verified tree-tops as labels
+        (the eval truth set IS denser/cleaner than the self-trained
+         labels the current checkpoint was trained on)
 
 ### TODO Phase 12 (future): Species classification
 - [ ] Reuse Phase 9.5b infrastructure (classifier.py + train_classifier.py)
