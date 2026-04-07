@@ -70,6 +70,7 @@ from forest_pulse.lidar import (  # noqa: E402
     fetch_laz_for_patch,
     lidar_tree_top_filter,
 )
+from forest_pulse.patches import get_patch_center  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -102,15 +103,6 @@ MIN_DETECTION_CONF: float = 0.01
 # range` from torch.topk.
 DEFAULT_NUM_SELECT: int = 300
 MAX_NUM_SELECT: int = 600
-
-
-def _get_patch_center(patch_name: str) -> tuple[float, float]:
-    """Look up the geographic center of a patch from the metadata CSV."""
-    with open(METADATA_CSV) as f:
-        for row in csv.DictReader(f):
-            if row["filename"] == patch_name:
-                return float(row["x_center"]), float(row["y_center"])
-    raise ValueError(f"Patch {patch_name} not found in {METADATA_CSV}")
 
 
 def _set_num_select(checkpoint: str, num_select: int) -> None:
@@ -163,7 +155,7 @@ def _build_low_conf_record(
         logger.error("Patch missing: %s", patch_path)
         return None
 
-    x_center, y_center = _get_patch_center(patch_name)
+    x_center, y_center = get_patch_center(METADATA_CSV, patch_name)
     half = PATCH_SIZE_M / 2.0
     bounds = (
         x_center - half, y_center - half,

@@ -53,6 +53,7 @@ from forest_pulse.lidar import (  # noqa: E402
     fetch_laz_for_patch,
     lidar_tree_top_filter,
 )
+from forest_pulse.patches import get_patch_center  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -73,15 +74,6 @@ DEFAULT_PATCHES = [
 ]
 
 
-def _get_patch_center(patch_name: str) -> tuple[float, float]:
-    """Look up the geographic center of a patch from the metadata CSV."""
-    with open(METADATA_CSV) as f:
-        for row in csv.DictReader(f):
-            if row["filename"] == patch_name:
-                return float(row["x_center"]), float(row["y_center"])
-    raise ValueError(f"Patch {patch_name} not found in {METADATA_CSV}")
-
-
 def _build_patch_record(patch_name: str, checkpoint: str) -> dict | None:
     """Run detection + LAZ download for one patch.
 
@@ -93,7 +85,7 @@ def _build_patch_record(patch_name: str, checkpoint: str) -> dict | None:
         logger.error("Patch missing: %s", patch_path)
         return None
 
-    x_center, y_center = _get_patch_center(patch_name)
+    x_center, y_center = get_patch_center(METADATA_CSV, patch_name)
     half = PATCH_SIZE_M / 2.0
     bounds = (
         x_center - half, y_center - half,

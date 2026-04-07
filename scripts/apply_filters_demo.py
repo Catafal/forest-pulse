@@ -18,7 +18,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import csv
 import logging
 from pathlib import Path
 
@@ -28,6 +27,7 @@ from PIL import Image
 from forest_pulse.detect import detect_trees
 from forest_pulse.lidar import fetch_chm_for_patch, filter_by_height
 from forest_pulse.ndvi import fetch_ndvi_for_patch, filter_by_ndvi
+from forest_pulse.patches import get_patch_center
 from forest_pulse.visualize import annotate_trees
 
 logger = logging.getLogger(__name__)
@@ -41,15 +41,6 @@ CHECKPOINT = PROJECT_ROOT / "checkpoints" / "current.pt"
 # Patches are 640 px square at 0.25 m/px = 160 m real-world
 PATCH_SIZE_PX = 640
 PATCH_SIZE_M = 160.0
-
-
-def _get_patch_bounds(patch_name: str) -> tuple[float, float]:
-    """Look up the geographic center of a patch from the metadata CSV."""
-    with open(METADATA_CSV) as f:
-        for row in csv.DictReader(f):
-            if row["filename"] == patch_name:
-                return float(row["x_center"]), float(row["y_center"])
-    raise ValueError(f"Patch {patch_name} not found in metadata")
 
 
 def _save_annotated(image, detections, name: str) -> None:
@@ -66,7 +57,7 @@ def run_demo(patch_name: str, ndvi_threshold: float, height_threshold: float) ->
         raise FileNotFoundError(f"Patch not found: {patch_path}")
 
     # Patch geographic bounds from metadata
-    x_center, y_center = _get_patch_bounds(patch_name)
+    x_center, y_center = get_patch_center(METADATA_CSV, patch_name)
     half = PATCH_SIZE_M / 2
     image_bounds = (
         x_center - half,

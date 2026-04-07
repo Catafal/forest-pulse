@@ -1,26 +1,24 @@
 ## Current State
 
-Phase: 10c COMPLETE — Sliced inference ALMOST DOUBLED F1 over 10a
-Model:  RF-DETR + detect_trees_sliced (9× 320×320 tiles, 50% overlap)
+Phase: 10d COMPLETE — production wiring + inventory driver shipped
+Model:  RF-DETR + detect_trees_sliced (9× 320×320 tiles, conf=0.02, 9.5a filter)
 Eval:   Honest LiDAR-verified F1 progression (10-patch reference set):
           Phase 8 baseline (raw, conf=0.30):              F1 = 0.108
           Phase 9.5a deterministic filter (conf=0.30):    F1 = 0.127  (+17%)
           Phase 9.5b RGB classifier (refuted):            F1 = 0.103  (-5%)
           Phase 10a (filter, conf=0.02):                  F1 = 0.251  (+132%)
           Phase 10b (num_select=600):                     F1 = 0.252  (no change)
-          Phase 10c 4-tile slicing (filter, conf=0.01):   F1 = 0.479  (+343%)
-          Phase 10c NEW BEST 9-tile slicing:              F1 = 0.487  (+351%)
-        Detector now finds 1356 of 3320 LiDAR-verified trees (vs 225
-        at Phase 8 baseline — a 6.0x rescue multiplier). Recall jumped
-        from 6.8% → 40.8%. Phase 10b's "F1 = 0.252 is the legitimate
-        ceiling" was wrong — slicing sidesteps the per-call 300-query
-        cap AND fixes the small-object regime problem at 25 cm/px.
-        The actual ceiling is closer to F1 = 0.58 (arithmetic max at
-        R=0.408 with perfect precision); we're at 0.487 = 84% of that.
-Next:   Phase 10d — wire detect_trees_sliced into full_pipeline_demo.py
-        + build inventory_montseny.py batch driver. Now has a real
-        reason to ship: the headline production number is 4.5× the
-        Phase 8 baseline.
+          Phase 10c 9-tile slicing:                       F1 = 0.487  (+351%)
+        Production operating point: sliced 320px + 9.5a filter + conf=0.02.
+        Phase 10d turns this into THE FIRST REAL PRODUCT DELIVERABLE:
+        a single GeoJSON a forester can open in QGIS and see every
+        filter-verified tree in Montseny. 10-patch validation run
+        produced 2119 trees in 8.1s; extrapolated full-park run
+        ~150k-200k trees in ~12 min (warm cache) or ~1 hr (cold).
+Next:   None in flight. Future options:
+        - Run the full 800-patch inventory when ready (~1 hour)
+        - Phase 11: higher-res drone imagery (weeks) for recall > 0.408
+        - Phase 12: species classification using the existing infra
 
 ## Completed
 
@@ -171,21 +169,30 @@ Phase 9.5b: RGB-distilled classifier — HYPOTHESIS REFUTED
 
 ## Planned sequence — "detect once, classify many times"
 
-### Phase 10d: Production wiring  (NEXT — 1-2 hours, real reason to ship now)
-- [ ] full_pipeline_demo.py — use detect_trees_sliced +
-      lidar_tree_top_filter + conf=0.01 as the production Catalunya
-      pipeline. Add --slice-size CLI flag to opt into non-sliced
-      mode for non-Catalunya regions.
-- [ ] scripts/inventory_montseny.py — NEW batch driver. Loop all
-      800 patches with the new operating point, dedupe overlapping
-      detections via gpd.sjoin_nearest, write ONE Montseny-wide
-      GeoJSON + per-zone summary CSV.
-- [ ] Expected runtime: 800 patches × 0.5s/patch = 7 minutes
-      on MPS. Acceptable for a one-shot park-wide inventory.
-- [ ] Consolidate duplicate _get_patch_center helpers across
-      scripts into forest_pulse.metadata or similar.
-- [ ] Update full_pipeline_demo docstring to reflect the honest
-      F1 = 0.487 number.
+### Phase 10d: Production wiring — SHIPPED
+- [x] src/forest_pulse/patches.py — NEW helper module with
+      get_patch_center(), get_patch_bounds(), iter_patch_names().
+      9 unit tests cover all paths.
+- [x] 5 scripts consolidated to use forest_pulse.patches instead
+      of local duplicated helpers: full_pipeline_demo,
+      apply_filters_demo, run_lidar_eval, train_classifier,
+      sweep_confidence. Zero behavior change.
+- [x] scripts/full_pipeline_demo.py rewired to use the Phase 10c
+      operating point by default: sliced 320px + 9.5a filter +
+      conf=0.02. New CLI flags: --no-slice, --no-lidar-filter,
+      --ndvi, --confidence. Per-stage counts printed.
+- [x] scripts/inventory_montseny.py — NEW 345-line batch driver.
+      Loops all 800 patches (or --zone / --limit subset), runs
+      Phase 10c pipeline per patch, cross-patch dedup via
+      gpd.sjoin_nearest at 1m tolerance, writes ONE Montseny-wide
+      GeoJSON + per-zone summary CSV + flat attribute CSV.
+      Graceful per-patch error handling.
+- [x] Validation: 10-patch run produced 2119 trees in 8.1s.
+      Per-zone breakdown, health distribution, EPSG:4326 output
+      all verified via geopandas read_file (loads directly in QGIS).
+- [x] 148/148 tests passing, ruff clean.
+- [x] See .claude/runs/production-wiring-and-inventory/RESULTS.md
+      for full validation numbers and reproducibility notes.
 
 ### Phase 10b: Raise rfdetr top_k cap — TESTED, DEAD END
 - [x] rfdetr architecture: pred_logits is [B, 300, 2] → 300 queries
