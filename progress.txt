@@ -1,28 +1,129 @@
 ## Current State
 
-Phase: 2 COMPLETE — RF-DETR trained on Montseny data
-Status: FIRST MODEL TRAINED — 41.5% mAP50 on Catalan forests
-Next: More epochs / annotation correction / auto-research harness to improve
+Phase: 5 COMPLETE — Full pipeline + SAM2 hybrid segmentation shipped
+Model:  RF-DETR self-trained at conf 0.3 | mAP50 0.904 (on self-labels, inflated)
+Honest: real recall ~20-30% on dense canopy, precision ~80-90% on what IS detected
+Next:   LiDAR feature extraction → honest eval metric → auto-labeled classifier
 
 ## Completed
-- [x] Repo initialized with Agentic Engineering SOP structure
-- [x] SOP audit — all docs aligned with contracts
-- [x] Phase 1: detect.py + health.py + visualize.py + demo.py (DeepForest)
-- [x] device.py — cross-platform CUDA / MPS / CPU detection
-- [x] RF-DETR fine-tuning pipeline (train.py + eval.py)
-- [x] DATA PIVOT: Catalan forests only (ICGC Montseny orthophotos)
-- [x] download_montseny.py — ICGC WMS client for 3 elevation zones
-- [x] tile_orthophoto.py — GeoTIFF → 640x640 patches (300 patches, 72MB)
-- [x] bootstrap_annotations.py — DeepForest weak labels (10,376 trees)
-- [x] RF-DETR trained 10 epochs on Montseny weak labels
-  - mAP50: 0.415 | Precision: 0.438 | Recall: 0.512 | F1: 0.472
-  - 80 trees detected on test patch (vs DeepForest's 45)
 
-## Improvement Options (not started)
-- [ ] More training epochs (20-50) — model was still improving at epoch 10
-- [ ] Annotation correction in Roboflow — clean up weak labels, retrain
-- [ ] Auto-research harness — optimize LR, backbone, batch size overnight
-- [ ] More data — download more ICGC zones beyond the 3 current ones
+Phase 1: MVP (DeepForest pretrained)
+- [x] detect.py / health.py / visualize.py / demo.py
+- [x] device.py — cross-platform MPS / CUDA / CPU detection
+- [x] MPS fallback env var for SAM2 compat
+
+Phase 2: Training pipeline
+- [x] RF-DETR fine-tuning (autoresearch/train.py)
+- [x] Evaluation pipeline (autoresearch/eval.py)
+- [x] Self-training loop (scripts/self_train.py) — 3-round iterative label refinement
+- [x] Cross-platform training on Apple MPS
+
+Phase 3: Data — pivoted to Catalan forests only
+- [x] download_montseny.py — ICGC WMS client, 8 elevation zones (3 original + 5 added)
+- [x] tile_orthophoto.py — GeoTIFF → 640x640 patches at 25cm/px
+- [x] bootstrap_annotations.py — DeepForest weak labels via predict_tile
+- [x] prepare_rfdetr_dataset.py — COCO split for training
+- [x] 800 patches × 26,913 weak labels across 8 Montseny zones
+
+Phase 4: Filters
+- [x] ndvi.py — ICGC CIR orthophoto fetch + non-vegetation filter (threshold 0.15)
+- [x] lidar.py — filter_by_height() works on any CHM; fetch_chm_for_patch is a stub
+  (blocked: ICGC DSM only via WMS rendered visualization, not raw float)
+
+Phase 5: Core GIS pipeline
+- [x] georef.py — sv.Detections → GeoDataFrame (EPSG:25831 + WGS84 export)
+- [x] temporal.py — compare_periods() via gpd.sjoin_nearest
+- [x] export.py — GeoJSON / CSV / Shapefile / change report JSON
+- [x] full_pipeline_demo.py — end-to-end detect→health→NDVI→georef→GeoJSON
+
+Phase 6: SAM2 hybrid segmentation
+- [x] segment.py — refinement + automatic mode + hybrid detector
+- [x] HuggingFace transformers Sam2Model + Sam2Processor on MPS
+- [x] Backward-compatible use_masks in health.py, mask-derived crown area in georef.py
+- [x] A/B test: 10 patches, RF-DETR 840 → Hybrid 873 (+3.9%)
+  - Best: patch 0250 (dense beech) 6 → 10 (+67%)
+  - Hybrid is 26x slower (~7s per patch vs 0.3s)
+
+## Key learnings (the honest ones)
+- mAP 0.904 is inflated — measured against self-labels, not ground truth
+- Real recall ~20-30% in dense uniform canopy (crown merging problem, not model problem)
+- Precision ~80-90% on what IS detected (based on visual review)
+- NDVI can't distinguish trees from bushes (both chlorophyll-rich)
+- LiDAR height is the ONLY reliable tree-vs-bush discriminator
+- Foundation segmentation models (SAM2) help modestly on distinct crowns, not on uniform canopy
+- Detection and classification should be separate concerns (post-hoc classifier architecture)
+
+## Planned sequence — "detect once, classify many times"
+
+### TODO Phase 7: LiDAR feature extraction  (NEXT — 3-4 hours)
+- [ ] Add `laspy` dependency
+- [ ] Download ICGC LAZ tiles for Montseny (~12 GB, gitignored)
+  - URL pattern: datacloud.icgc.cat/datacloud/lidar-territorial/laz_unzip/...
+- [ ] lidar.py::fetch_laz_for_patch(x_center, y_center) — download + cache 1km LAZ
+- [ ] lidar.py::compute_chm_from_laz(laz_path, bounds) — rasterize DSM − DTM
+- [ ] lidar.py::extract_lidar_features(detections, laz_path, bounds) → per-tree:
+  - height_p95_m        — tree top (use for > 5m filter)
+  - height_p50_m        — crown center height
+  - vertical_spread_m   — p95 − p5, proxies trunk+crown depth
+  - point_count         — LiDAR return density
+  - return_ratio        — multi-return / single-return (canopy density)
+  - intensity_mean      — needle vs broadleaf reflectance signal
+  - intensity_std       — crown heterogeneity
+- [ ] Wire existing filter_by_height() to use the new CHM path
+- [ ] Add LiDAR columns to georef.py output when features are available
+- [ ] Smoke test on patch 0250 — verify shrub-vs-tree discrimination
+
+### TODO Phase 8: Honest eval metric  (1-2 hours)
+- [ ] Build a LiDAR-verified eval set from held-out patches
+- [ ] New eval_lidar_verified.py — mAP against physically-verified trees
+- [ ] Run current RF-DETR model against it → FIRST honest number
+- [ ] Document the gap between inflated self-labels and real performance
+
+### TODO Phase 9: Auto-labeled classifier  (2-3 hours)
+- [ ] LiDAR auto-labeler:
+  - height_p95 > 5m → label = "tree"  (auto)
+  - height_p95 < 2m → label = "bush"  (auto)
+  - 2m < height < 5m → skip (ambiguous)
+- [ ] Build feature matrix per detection:
+  - mean_grvi, mean_exg, mean_rgb (from health)
+  - mask_area_m2, mask_circularity (from SAM2)
+  - lidar_height_p95, vertical_spread, canopy_density, intensity (from LiDAR)
+- [ ] Train small XGBoost classifier on auto-labels
+- [ ] Evaluate against held-out LiDAR-verified set
+- [ ] Target: > 90% precision on tree vs bush
+
+### TODO Phase 10: Wire classifier into pipeline  (1 hour)
+- [ ] Classifier becomes final stage in full_pipeline_demo.py
+- [ ] GeoJSON export only includes confirmed trees
+- [ ] Log kept / dropped counts per stage
+
+### TODO Phase 11: Auto-research  (overnight, when ready)
+- [ ] Only AFTER honest eval metric exists (Phase 8)
+- [ ] Optimize RF-DETR hyperparams + classifier hyperparams against LiDAR-verified mAP
+- [ ] Karpathy-style harness already exists in autoresearch/
+
+### TODO Phase 12 (future): Species classification
+- [ ] Same classifier architecture, new output head
+- [ ] Needs some species-labeled examples (dozens per species)
+- [ ] LiDAR features are critical here — 15-30% accuracy boost per published papers
+- [ ] Feature vector already includes everything the classifier needs
+
+## Core architectural principle
+
+**Detect once, classify many times.**
+RF-DETR finds crown-like regions. A separate classifier decides what each one is.
+The detector stays frozen unless evidence says otherwise. Classification improvements
+iterate in seconds (retrain XGBoost) instead of 20+ minutes (retrain RF-DETR).
 
 ## Blockers
-None. Model works. Decision point: improve further or move to Phase 3 (temporal).
+
+None. LiDAR LAZ path is ready to implement — just needs the hours.
+
+## Deferred / out of scope
+
+- Copernicus GLO-30 DSM (30m too coarse, dead end)
+- Roboflow manual annotation (hard + boring + redundant given LiDAR auto-labels)
+- GroundingDINO teacher (tested — can't see individual crowns from above)
+- Fine-tuning SAM2 on tree crowns (foundation model works zero-shot, fine-tune has low ROI)
+- KML export (GeoJSON covers the use case)
+- HTML reports with interactive maps
