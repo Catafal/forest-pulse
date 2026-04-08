@@ -509,6 +509,73 @@ def bbox_centers_to_world(
     return np.stack([cx_world, cy_world], axis=1)
 
 
+def world_to_pixel(
+    x_world: float,
+    y_world: float,
+    image_bounds: tuple[float, float, float, float],
+    image_size_px: tuple[int, int],
+) -> tuple[float, float]:
+    """Inverse of bbox_centers_to_world's single-point case.
+
+    Converts a single world coordinate (EPSG:25831 meters) to pixel
+    coordinates in the patch image frame. Matches the Y-inversion
+    convention used everywhere in the pipeline (image row 0 → y_max
+    in world coords).
+
+    NOT clipped to image bounds — callers decide how to handle
+    out-of-frame positions. Phase 11a's `detect_trees_from_lidar`
+    uses this to project LiDAR tree-top world positions back to the
+    image frame for bbox construction, then drops boxes that clip
+    to zero area after bounds-clipping.
+
+    Args:
+        x_world: X coordinate in EPSG:25831 meters.
+        y_world: Y coordinate in EPSG:25831 meters.
+        image_bounds: (x_min, y_min, x_max, y_max) in meters.
+        image_size_px: (width, height) in pixels.
+
+    Returns:
+        (px, py) float tuple. Top-left corner of image is (0, 0).
+    """
+    x_min, y_min, x_max, y_max = image_bounds
+    w_px, h_px = image_size_px
+    x_scale = w_px / (x_max - x_min)
+    y_scale = h_px / (y_max - y_min)
+    px = (x_world - x_min) * x_scale
+    # Y is inverted: row 0 → y_max, row h_px → y_min
+    py = (y_max - y_world) * y_scale
+    return (float(px), float(py))
+
+
+def world_to_pixel_batch(
+    positions: np.ndarray,
+    image_bounds: tuple[float, float, float, float],
+    image_size_px: tuple[int, int],
+) -> np.ndarray:
+    """Vectorized world → pixel conversion.
+
+    Args:
+        positions: (N, 2) float64 array of (x_world, y_world) rows.
+        image_bounds: (x_min, y_min, x_max, y_max) in meters.
+        image_size_px: (width, height) in pixels.
+
+    Returns:
+        (N, 2) float64 array of (px, py) rows. Empty input →
+        zero-row array.
+    """
+    if positions.size == 0:
+        return np.zeros((0, 2), dtype=np.float64)
+
+    x_min, y_min, x_max, y_max = image_bounds
+    w_px, h_px = image_size_px
+    x_scale = w_px / (x_max - x_min)
+    y_scale = h_px / (y_max - y_min)
+
+    px = (positions[:, 0] - x_min) * x_scale
+    py = (y_max - positions[:, 1]) * y_scale
+    return np.stack([px, py], axis=1).astype(np.float64)
+
+
 def lidar_tree_top_filter(
     detections: sv.Detections,
     image_bounds: tuple[float, float, float, float],

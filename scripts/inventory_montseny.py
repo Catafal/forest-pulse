@@ -61,7 +61,7 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 
-from forest_pulse.detect import detect_trees_sliced
+from forest_pulse.detect import detect_trees_from_lidar, detect_trees_sliced
 from forest_pulse.export import to_csv, to_geojson
 from forest_pulse.georef import georeference
 from forest_pulse.health import score_health
@@ -115,8 +115,17 @@ def _process_single_patch(
     checkpoint: str,
     confidence: float,
     zone: str,
+    detector: str = "sliced",
 ) -> gpd.GeoDataFrame | None:
-    """Run the Phase 10c pipeline on one patch → GeoDataFrame.
+    """Run the detection pipeline on one patch → GeoDataFrame.
+
+    Two detectors supported:
+      - `sliced` (Phase 10c default): RF-DETR sliced inference +
+        Phase 9.5a LiDAR tree-top filter. F1 ≈ 0.487 on the
+        reference set.
+      - `lidar-first` (Phase 11a): LiDAR tree-tops become the
+        primary detector; each peak becomes one detection with a
+        fixed 5 m radius bbox. F1 target: ≈ 0.85.
 
     Returns None when no trees survive filtering (empty patch or
     detection failure).
@@ -134,28 +143,38 @@ def _process_single_patch(
 
     image = np.array(Image.open(patch_path).convert("RGB"))
 
-    # Stage 1: sliced detection (Phase 10c)
-    detections = detect_trees_sliced(
-        image, model_name=checkpoint, confidence=confidence,
-        slice_wh=DEFAULT_SLICE_WH, overlap_wh=DEFAULT_OVERLAP_WH,
-        iou_threshold=DEFAULT_IOU_THRESHOLD,
-    )
-    if len(detections) == 0:
-        return None
-
-    # Stage 2: health scoring
-    health = score_health(image, detections)
-
-    # Stage 3: Phase 9.5a LiDAR tree-top filter
-    laz_path = fetch_laz_for_patch(x_center, y_center)
-    detections = lidar_tree_top_filter(
-        detections, image_bounds, image_size, laz_path,
-    )
-    if len(detections) == 0:
-        return None
-    # Align health scores with the filtered detections (filter
-    # preserves per-detection ordering).
-    health = health[:len(detections)]
+    if detector == "lidar-first":
+        # Phase 11a: LiDAR peaks become the detector. No RF-DETR
+        # at all by default — pure physics-based detection.
+        laz_path = fetch_laz_for_patch(x_center, y_center)
+        detections = detect_trees_from_lidar(
+            laz_path=laz_path,
+            image_bounds=image_bounds,
+            image_size_px=image_size,
+        )
+        if len(detections) == 0:
+            return None
+        # Health scoring uses the fixed-radius bboxes as crops.
+        health = score_health(image, detections)
+    else:
+        # Phase 10c: sliced detection + 9.5a filter.
+        detections = detect_trees_sliced(
+            image, model_name=checkpoint, confidence=confidence,
+            slice_wh=DEFAULT_SLICE_WH, overlap_wh=DEFAULT_OVERLAP_WH,
+            iou_threshold=DEFAULT_IOU_THRESHOLD,
+        )
+        if len(detections) == 0:
+            return None
+        health = score_health(image, detections)
+        laz_path = fetch_laz_for_patch(x_center, y_center)
+        detections = lidar_tree_top_filter(
+            detections, image_bounds, image_size, laz_path,
+        )
+        if len(detections) == 0:
+            return None
+        # Align health scores with the filtered detections (filter
+        # preserves per-detection ordering).
+        health = health[:len(detections)]
 
     # Stage 4: georeference → GeoDataFrame with per-tree attributes.
     gdf = georeference(
@@ -293,15 +312,22 @@ def run_inventory(
     patches: list[str],
     checkpoint: str,
     confidence: float = DEFAULT_CONFIDENCE,
+    detector: str = "sliced",
 ) -> None:
     """Top-level driver. Processes every patch in `patches`."""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     zone_lookup = _load_zone_lookup(METADATA_CSV)
 
     print(f"Inventory over {len(patches)} patches")
+    print(f"Detector: {detector}")
     print(f"Checkpoint: {checkpoint}")
-    print(f"Operating point: sliced {DEFAULT_SLICE_WH}px × "
-          f"{DEFAULT_OVERLAP_WH} overlap, conf={confidence}, +9.5a filter")
+    if detector == "lidar-first":
+        print("Operating point: LiDAR tree-tops (Phase 11a), "
+              "fixed 2.5m crown radius")
+    else:
+        print("Operating point: sliced "
+              f"{DEFAULT_SLICE_WH}px × {DEFAULT_OVERLAP_WH} overlap, "
+              f"conf={confidence}, +9.5a filter")
     print()
 
     per_patch_gdfs: list[gpd.GeoDataFrame] = []
@@ -311,7 +337,9 @@ def run_inventory(
         t0 = time.perf_counter()
         zone = zone_lookup.get(name, "unknown")
         try:
-            gdf = _process_single_patch(name, checkpoint, confidence, zone)
+            gdf = _process_single_patch(
+                name, checkpoint, confidence, zone, detector=detector,
+            )
         except Exception as e:
             # Don't let one bad patch kill the whole inventory run.
             # Log and continue — the partial result is still useful.
@@ -420,8 +448,18 @@ def main():
     parser.add_argument(
         "--confidence", type=float, default=DEFAULT_CONFIDENCE,
         help=(
-            "Detection confidence threshold. Default 0.02 is the "
-            "Phase 10a sweet spot for the sliced + filter regime."
+            "Detection confidence threshold (sliced mode only). "
+            "Default 0.02 is the Phase 10a sweet spot for the "
+            "sliced + filter regime. Ignored when --detector "
+            "lidar-first."
+        ),
+    )
+    parser.add_argument(
+        "--detector", choices=["sliced", "lidar-first"], default="sliced",
+        help=(
+            "Detection pipeline: 'sliced' = Phase 10c RF-DETR + "
+            "9.5a filter (F1 ≈ 0.487). 'lidar-first' = Phase 11a, "
+            "LiDAR peaks are the primary detector (F1 target ≈ 0.85)."
         ),
     )
     args = parser.parse_args()
@@ -439,7 +477,11 @@ def main():
         print("No patches selected.")
         return
 
-    run_inventory(patches, args.checkpoint, confidence=args.confidence)
+    run_inventory(
+        patches, args.checkpoint,
+        confidence=args.confidence,
+        detector=args.detector,
+    )
 
 
 if __name__ == "__main__":
