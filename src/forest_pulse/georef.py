@@ -53,6 +53,9 @@ _BASE_COLUMNS = [
 # Extra columns emitted when health_scores are provided.
 _HEALTH_COLUMNS = ["health_label", "grvi", "exg", "health_confidence"]
 
+# Phase 12a: extra column emitted when species_groups are provided.
+_SPECIES_COLUMNS = ["species_group"]
+
 # Extra columns emitted when lidar_features are provided.
 _LIDAR_COLUMNS = [
     "lidar_height_p95", "lidar_height_p50", "lidar_vertical_spread",
@@ -67,6 +70,7 @@ def georeference(
     image_size_px: tuple[int, int],
     health_scores: list[HealthScore] | None = None,
     lidar_features: list[LiDARFeatures] | None = None,
+    species_groups: list[str] | None = None,
     crs: str = "EPSG:25831",
 ) -> gpd.GeoDataFrame:
     """Convert pixel-space detections to a GeoDataFrame.
@@ -116,6 +120,8 @@ def georeference(
     columns = list(_BASE_COLUMNS)
     if health_scores is not None:
         columns += _HEALTH_COLUMNS
+    if species_groups is not None:
+        columns += _SPECIES_COLUMNS
     if lidar_features is not None:
         columns += _LIDAR_COLUMNS
 
@@ -183,6 +189,13 @@ def georeference(
             row["grvi"] = round(hs.grvi, 4) if hs else 0.0
             row["exg"] = round(hs.exg, 4) if hs else 0.0
             row["health_confidence"] = round(hs.confidence, 4) if hs else 0.0
+
+        # Phase 12a: species_group column from classify_broadleaf_conifer.
+        # Out-of-range indices get "unknown" to keep the schema stable.
+        if species_groups is not None:
+            row["species_group"] = (
+                species_groups[i] if i < len(species_groups) else "unknown"
+            )
 
         if lidar_features is not None:
             lf = lidar_features[i] if i < len(lidar_features) else None

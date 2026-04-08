@@ -354,6 +354,78 @@ def test_crown_segmentation_on_stores_polygons_and_heights(monkeypatch):
     assert abs((bbox0[3] - bbox0[1]) - 40.0) < 1e-3
 
 
+# ============================================================
+# Phase 12a — extract_lidar_features integration
+# ============================================================
+
+
+def test_extract_lidar_features_default_off_no_data_key(monkeypatch):
+    """Default extract_lidar_features=False → no lidar_features
+    key in detections.data. Back-compat with Phase 11a/11b.
+    """
+    _stub_lidar_pipeline(
+        monkeypatch,
+        positions=[(80.0, 80.0)],
+        heights=[15.0],
+    )
+    dets = detect_trees_from_lidar(
+        laz_path="/fake.laz",
+        image_bounds=(0.0, 0.0, 160.0, 160.0),
+        image_size_px=(640, 640),
+    )
+    assert "lidar_features" not in dets.data
+
+
+def test_extract_lidar_features_on_populates_data_dict(monkeypatch):
+    """extract_lidar_features=True stores a list of LiDARFeatures
+    in detections.data["lidar_features"] with length matching
+    the detection count.
+    """
+    from forest_pulse.lidar import LiDARFeatures
+
+    _stub_lidar_pipeline(
+        monkeypatch,
+        positions=[(40.0, 40.0), (120.0, 120.0)],
+        heights=[12.0, 18.0],
+    )
+
+    # Stub Phase 7's extract_lidar_features to return a known list.
+    # detect_trees_from_lidar imports it at call time from the
+    # lidar module, so we patch there.
+    import forest_pulse.lidar as lidar_mod
+    fake_features = [
+        LiDARFeatures(
+            tree_id=0, height_p95_m=12.0, height_p50_m=8.0,
+            vertical_spread_m=6.0, point_count=50,
+            return_ratio=0.4, intensity_mean=1200.0, intensity_std=200.0,
+        ),
+        LiDARFeatures(
+            tree_id=1, height_p95_m=18.0, height_p50_m=12.0,
+            vertical_spread_m=10.0, point_count=80,
+            return_ratio=0.6, intensity_mean=1500.0, intensity_std=300.0,
+        ),
+    ]
+    monkeypatch.setattr(
+        lidar_mod, "extract_lidar_features",
+        lambda **kwargs: fake_features,
+    )
+
+    dets = detect_trees_from_lidar(
+        laz_path="/fake.laz",
+        image_bounds=(0.0, 0.0, 160.0, 160.0),
+        image_size_px=(640, 640),
+        extract_lidar_features=True,
+    )
+
+    assert "lidar_features" in dets.data
+    stored = dets.data["lidar_features"]
+    assert len(stored) == 2
+    assert stored[0].intensity_mean == 1200.0
+    assert stored[1].return_ratio == 0.6
+    # Length matches detection count
+    assert len(stored) == len(dets)
+
+
 def test_detect_from_lidar_rf_detr_verify_drops_unmatched(monkeypatch):
     """rf_detr_verify drops LiDAR peaks RF-DETR doesn't see."""
     _stub_lidar_pipeline(

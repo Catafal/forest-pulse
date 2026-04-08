@@ -70,6 +70,11 @@ from forest_pulse.patches import (
     get_patch_bounds,
     iter_patch_names,
 )
+from forest_pulse.species import (
+    SPECIES_GROUP_BROADLEAF,
+    SPECIES_GROUP_CONIFER,
+    classify_broadleaf_conifer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -143,22 +148,35 @@ def _process_single_patch(
 
     image = np.array(Image.open(patch_path).convert("RGB"))
 
+    # Per-tree LiDAR features — populated in the lidar-first branch
+    # (Phase 12a), left as None in the sliced branch so georeference
+    # doesn't emit the 7 lidar_* columns there.
+    lidar_features = None
+
     if detector == "lidar-first":
-        # Phase 11a + 11b: LiDAR peaks become the detector AND each
-        # tree gets a watershed-segmented crown polygon. The polygons
-        # are stored in detections.data["crown_polygon"] and the
-        # downstream georeference() auto-detects them as the geometry.
+        # Phase 11a + 11b + 12a: LiDAR peaks are the detector, each
+        # tree gets a watershed-segmented crown polygon, AND each
+        # tree gets per-tree LiDAR features (return_ratio +
+        # intensity_mean) for downstream species classification.
+        # Species classification itself happens in run_inventory
+        # AFTER concat + dedup so the z-score normalization is
+        # computed globally across all patches.
         laz_path = fetch_laz_for_patch(x_center, y_center)
         detections = detect_trees_from_lidar(
             laz_path=laz_path,
             image_bounds=image_bounds,
             image_size_px=image_size,
             crown_segmentation=True,
+            extract_lidar_features=True,
         )
         if len(detections) == 0:
             return None
         # Health scoring uses the (polygon-derived) bboxes as crops.
         health = score_health(image, detections)
+        # Pull out the LiDAR feature list so georeference can emit
+        # the 7 lidar_* columns; Phase 12a species classification
+        # reads return_ratio + intensity_mean from those columns.
+        lidar_features = detections.data.get("lidar_features", None)
     else:
         # Phase 10c: sliced detection + 9.5a filter.
         detections = detect_trees_sliced(
@@ -180,8 +198,13 @@ def _process_single_patch(
         health = health[:len(detections)]
 
     # Stage 4: georeference → GeoDataFrame with per-tree attributes.
+    # Phase 12a: the lidar-first branch passes lidar_features so the
+    # output gets 7 lidar_* columns. The sliced branch leaves it as
+    # None so its output schema is unchanged.
     gdf = georeference(
-        detections, image_bounds, image_size, health_scores=health,
+        detections, image_bounds, image_size,
+        health_scores=health,
+        lidar_features=lidar_features,
     )
     if len(gdf) == 0:
         return None
@@ -374,6 +397,24 @@ def run_inventory(
     dedup = dedup.reset_index(drop=True)
     dedup["tree_id"] = dedup.index
 
+    # Phase 12a: classify species group (broadleaf vs conifer) GLOBALLY
+    # across all trees. The classifier is unsupervised: it z-score
+    # normalizes return_ratio + intensity_mean and thresholds at the
+    # 40th percentile (→ 60% broadleaf default, matching the Montseny
+    # IEFC prior). Global normalization is critical — per-patch
+    # classification would force every patch to be 60/40 instead of
+    # letting per-zone variance emerge naturally.
+    if "lidar_return_ratio" in dedup.columns and "lidar_intensity_mean" in dedup.columns:
+        predictions = classify_broadleaf_conifer(
+            return_ratios=dedup["lidar_return_ratio"].to_numpy(),
+            intensity_means=dedup["lidar_intensity_mean"].to_numpy(),
+        )
+        dedup["species_group"] = [p.label for p in predictions]
+    else:
+        # Sliced detector path — no per-tree LiDAR features to
+        # classify on. Leave species_group absent.
+        pass
+
     # Export.
     geojson_path = OUTPUT_DIR / "montseny_trees.geojson"
     csv_path = OUTPUT_DIR / "montseny_trees.csv"
@@ -402,6 +443,30 @@ def run_inventory(
     for label in ("healthy", "stressed", "dead", "unknown"):
         print(f"    {label:<14} {health_labels.get(label, 0)}")
     print()
+
+    # Phase 12a: species distribution (broadleaf vs conifer).
+    if "species_group" in dedup.columns:
+        species_counts = Counter(dedup["species_group"])
+        n_bl = species_counts[SPECIES_GROUP_BROADLEAF]
+        n_cf = species_counts[SPECIES_GROUP_CONIFER]
+        total_species = n_bl + n_cf
+        bl_frac = n_bl / total_species if total_species else 0
+        print("  Species distribution:")
+        print(f"    broadleaf      {n_bl}  ({bl_frac * 100:.1f}%)")
+        print(f"    conifer        {n_cf}  ({(1 - bl_frac) * 100:.1f}%)")
+        print()
+        print("  Per-zone species fractions:")
+        for zone, zone_df in dedup.groupby("source_zone"):
+            zone_species = Counter(zone_df["species_group"])
+            total_zone = zone_species[SPECIES_GROUP_BROADLEAF] + zone_species[SPECIES_GROUP_CONIFER]
+            bl_pct = (
+                100.0 * zone_species[SPECIES_GROUP_BROADLEAF] / total_zone
+                if total_zone else 0.0
+            )
+            print(f"    {str(zone):<14} broadleaf={bl_pct:5.1f}%  "
+                  f"({zone_species[SPECIES_GROUP_BROADLEAF]} / "
+                  f"{zone_species[SPECIES_GROUP_CONIFER]})")
+        print()
     print(f"  Runtime: {total_elapsed:.1f}s "
           f"({total_elapsed / max(len(patches), 1):.1f}s per patch)")
     print()

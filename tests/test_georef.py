@@ -112,6 +112,27 @@ def test_georef_falls_back_to_points_without_crown_polygon():
     assert all(gdf.geometry.apply(lambda g: isinstance(g, Point)))
 
 
+def test_georef_with_species_groups_adds_column():
+    """When species_groups is supplied, a species_group column
+    appears with the labels in the same order as detections.
+    """
+    dets = _make_dets(3)
+    bounds = (0.0, 0.0, 160.0, 160.0)
+    species = ["broadleaf", "conifer", "broadleaf"]
+    gdf = georeference(dets, bounds, (640, 640), species_groups=species)
+
+    assert "species_group" in gdf.columns
+    assert list(gdf["species_group"]) == species
+
+
+def test_georef_without_species_groups_no_column():
+    """When species_groups is None, the species_group column is NOT added."""
+    dets = _make_dets(3)
+    bounds = (0.0, 0.0, 160.0, 160.0)
+    gdf = georeference(dets, bounds, (640, 640))
+    assert "species_group" not in gdf.columns
+
+
 def test_georef_uses_crown_polygons_when_present():
     """When detections.data["crown_polygon"] is present and length-
     matches detections, the output geometries are POLYGONs and

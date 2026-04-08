@@ -204,6 +204,7 @@ def detect_trees_from_lidar(
     min_height_m: float = 5.0,
     crown_segmentation: bool = False,
     max_crown_area_m2: float = 200.0,
+    extract_lidar_features: bool = False,
     rf_detr_verify: bool = False,
     rf_detr_checkpoint: str | None = None,
     rf_detr_image: np.ndarray | None = None,
@@ -378,11 +379,30 @@ def detect_trees_from_lidar(
         dets.data["crown_polygon"] = crown_polygons
         dets.data["lidar_height_m"] = heights_kept.astype(np.float32)
 
+    # ---- Stage 7.5 (Phase 12a, opt-in): per-tree LiDAR features ----
+    # When enabled, populates detections.data["lidar_features"] with
+    # a list of LiDARFeatures (height percentiles, intensity mean/std,
+    # return ratio, point count, vertical spread). Phase 12a species
+    # classification reads return_ratio + intensity_mean from this
+    # list. Phase 12b DBH allometrics reads height_p95_m.
+    if extract_lidar_features:
+        from forest_pulse.lidar import (
+            extract_lidar_features as _extract_lidar_features,
+        )
+        lidar_features_list = _extract_lidar_features(
+            detections=dets,
+            image_bounds=image_bounds,
+            image_size_px=image_size_px,
+            laz_path=laz_path,
+        )
+        dets.data["lidar_features"] = lidar_features_list
+
     logger.info(
         "LiDAR-first detect: %d LiDAR peaks → %d detections "
-        "(crown_radius=%.1fm, min_height=%.1fm, crown_seg=%s)",
+        "(crown_radius=%.1fm, min_height=%.1fm, crown_seg=%s, "
+        "extract_features=%s)",
         len(positions), len(dets), crown_radius_m, min_height_m,
-        crown_segmentation,
+        crown_segmentation, extract_lidar_features,
     )
 
     # ---- Stage 8 (optional): RF-DETR visual verification ----
