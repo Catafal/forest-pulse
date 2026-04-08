@@ -2,7 +2,7 @@
 
 import numpy as np
 import supervision as sv
-from shapely.geometry import Point
+from shapely.geometry import Point, Polygon
 
 from forest_pulse.georef import georeference
 from forest_pulse.health import HealthScore
@@ -96,3 +96,41 @@ def test_georef_with_health_scores():
     assert "grvi" in gdf.columns
     assert list(gdf["health_label"]) == ["healthy", "stressed", "dead"]
     assert abs(gdf["grvi"].iloc[0] - 0.25) < 1e-4
+
+
+# ============================================================
+# Phase 11b — auto-detection of crown polygons in detections.data
+# ============================================================
+
+
+def test_georef_falls_back_to_points_without_crown_polygon():
+    """No crown_polygon in detections.data → Point geometry (Phase 10d)."""
+    dets = _make_dets(3)
+    # No crown_polygon in data — backward-compat path
+    bounds = (0.0, 0.0, 160.0, 160.0)
+    gdf = georeference(dets, bounds, (640, 640))
+    assert all(gdf.geometry.apply(lambda g: isinstance(g, Point)))
+
+
+def test_georef_uses_crown_polygons_when_present():
+    """When detections.data["crown_polygon"] is present and length-
+    matches detections, the output geometries are POLYGONs and
+    crown_area_m2 comes from polygon.area.
+    """
+    dets = _make_dets(2)
+    # Build two known polygons in EPSG:25831 world coordinates that
+    # the bounds (0, 0, 160, 160) cover.
+    polygons = [
+        Polygon([(10, 10), (20, 10), (20, 20), (10, 20)]),  # 10×10 = 100 m²
+        Polygon([(50, 50), (55, 50), (55, 55), (50, 55)]),  # 5×5 = 25 m²
+    ]
+    dets.data["crown_polygon"] = polygons
+    bounds = (0.0, 0.0, 160.0, 160.0)
+    gdf = georeference(dets, bounds, (640, 640))
+
+    # All output geometries are Polygons, not Points
+    assert all(gdf.geometry.apply(lambda g: isinstance(g, Polygon)))
+    assert len(gdf) == 2
+    # crown_area_m2 should match the polygon areas
+    assert abs(gdf["crown_area_m2"].iloc[0] - 100.0) < 0.01
+    assert abs(gdf["crown_area_m2"].iloc[1] - 25.0) < 0.01

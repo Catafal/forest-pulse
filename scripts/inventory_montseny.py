@@ -144,17 +144,20 @@ def _process_single_patch(
     image = np.array(Image.open(patch_path).convert("RGB"))
 
     if detector == "lidar-first":
-        # Phase 11a: LiDAR peaks become the detector. No RF-DETR
-        # at all by default — pure physics-based detection.
+        # Phase 11a + 11b: LiDAR peaks become the detector AND each
+        # tree gets a watershed-segmented crown polygon. The polygons
+        # are stored in detections.data["crown_polygon"] and the
+        # downstream georeference() auto-detects them as the geometry.
         laz_path = fetch_laz_for_patch(x_center, y_center)
         detections = detect_trees_from_lidar(
             laz_path=laz_path,
             image_bounds=image_bounds,
             image_size_px=image_size,
+            crown_segmentation=True,
         )
         if len(detections) == 0:
             return None
-        # Health scoring uses the fixed-radius bboxes as crops.
+        # Health scoring uses the (polygon-derived) bboxes as crops.
         health = score_health(image, detections)
     else:
         # Phase 10c: sliced detection + 9.5a filter.
@@ -322,8 +325,8 @@ def run_inventory(
     print(f"Detector: {detector}")
     print(f"Checkpoint: {checkpoint}")
     if detector == "lidar-first":
-        print("Operating point: LiDAR tree-tops (Phase 11a), "
-              "fixed 2.5m crown radius")
+        print("Operating point: LiDAR tree-tops + watershed crown "
+              "polygons (Phase 11a + 11b)")
     else:
         print("Operating point: sliced "
               f"{DEFAULT_SLICE_WH}px × {DEFAULT_OVERLAP_WH} overlap, "

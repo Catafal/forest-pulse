@@ -88,10 +88,24 @@ def georeference(
             EPSG:25831 (ETRS89 / UTM zone 31N, standard for Catalunya).
 
     Returns:
-        GeoDataFrame with one row per detection. Point geometry at the
-        bbox center, crown dimensions in meters, confidence, tree_id,
-        and — if provided — health and/or LiDAR fields. Empty input
-        produces an empty GeoDataFrame with the same schema (no crash).
+        GeoDataFrame with one row per detection. Geometry is a Point
+        at the bbox center BY DEFAULT, crown dimensions in meters,
+        confidence, tree_id, and — if provided — health and/or LiDAR
+        fields. Empty input produces an empty GeoDataFrame with the
+        same schema (no crash).
+
+    Phase 11b auto-detection:
+        If `detections.data` contains a 'crown_polygon' key (a list
+        of shapely Polygons in the CRS, one per detection), the
+        function uses those polygons as the geometry column instead
+        of bbox-center Points. `crown_area_m2` is then computed
+        from `polygon.area` rather than the bbox dimensions. The
+        bbox columns still report the polygon's bounding box for
+        downstream consumers that need a rectangular extent.
+
+        Behavior is data-driven: no new parameter. Phase 10d
+        callers (no `crown_polygon` in data) get unchanged Point
+        geometries.
     """
     # rfdetr adds source_shape/source_image to detections.data. These
     # don't align with the number of detections so any pandas/numpy
@@ -115,6 +129,15 @@ def georeference(
     has_masks = detections.mask is not None
     px_area_m2 = _compute_pixel_area_m2(image_bounds, image_size_px)
 
+    # Phase 11b: auto-detect watershed crown polygons in the data dict.
+    # When present, every output row gets a Polygon geometry and the
+    # crown_area_m2 column comes from the polygon, not the bbox.
+    has_crown_polygons = (
+        hasattr(detections, "data")
+        and "crown_polygon" in detections.data
+        and len(detections.data["crown_polygon"]) == n_dets
+    )
+
     rows = []
     geoms = []
     for i, xyxy in enumerate(detections.xyxy):
@@ -124,13 +147,19 @@ def georeference(
 
         width_m = g_xmax - g_xmin
         height_m = g_ymax - g_ymin
-        center = Point((g_xmin + g_xmax) / 2.0, (g_ymin + g_ymax) / 2.0)
 
-        # Crown area: mask-derived when available, else rectangular bbox
-        if has_masks:
+        # Geometry + crown area: polygon if Phase 11b enabled,
+        # else mask, else rectangular bbox.
+        if has_crown_polygons:
+            polygon = detections.data["crown_polygon"][i]
+            geom = polygon
+            crown_area = float(polygon.area)
+        elif has_masks:
+            geom = Point((g_xmin + g_xmax) / 2.0, (g_ymin + g_ymax) / 2.0)
             mask_px = int(detections.mask[i].sum())
             crown_area = mask_px * px_area_m2
         else:
+            geom = Point((g_xmin + g_xmax) / 2.0, (g_ymin + g_ymax) / 2.0)
             crown_area = width_m * height_m
 
         # Confidence may be None if the model didn't provide it; default to 0.
@@ -172,7 +201,7 @@ def georeference(
             )
 
         rows.append(row)
-        geoms.append(center)
+        geoms.append(geom)
 
     gdf = gpd.GeoDataFrame(
         pd.DataFrame(rows, columns=columns),

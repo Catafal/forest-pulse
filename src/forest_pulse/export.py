@@ -91,11 +91,13 @@ def to_csv(gdf: gpd.GeoDataFrame, output_path: str | Path) -> Path:
     path = _prepare_path(output_path)
     gdf_wgs84 = gdf.to_crs(WGS84) if gdf.crs != WGS84 else gdf
 
-    # Extract lon/lat from Point geometry. shapely exposes .x / .y on
-    # Point objects; .apply is clearer than accessor shortcuts for readers.
+    # Extract lon/lat — Phase 11b adds Polygon geometries to the
+    # output schema, so we use `.centroid.x / .centroid.y` which
+    # works uniformly for both Points (centroid is the point itself)
+    # and Polygons (centroid is the geometric center).
     flat = gdf_wgs84.drop(columns="geometry").copy()
-    flat["lon"] = gdf_wgs84.geometry.apply(lambda p: round(p.x, 7))
-    flat["lat"] = gdf_wgs84.geometry.apply(lambda p: round(p.y, 7))
+    flat["lon"] = gdf_wgs84.geometry.apply(lambda g: round(g.centroid.x, 7))
+    flat["lat"] = gdf_wgs84.geometry.apply(lambda g: round(g.centroid.y, 7))
 
     # Move lon/lat to the front so humans see them first when opening
     # the CSV in a spreadsheet.

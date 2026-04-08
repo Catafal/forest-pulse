@@ -202,6 +202,8 @@ def detect_trees_from_lidar(
     image_size_px: tuple[int, int],
     crown_radius_m: float = 2.5,
     min_height_m: float = 5.0,
+    crown_segmentation: bool = False,
+    max_crown_area_m2: float = 200.0,
     rf_detr_verify: bool = False,
     rf_detr_checkpoint: str | None = None,
     rf_detr_image: np.ndarray | None = None,
@@ -222,7 +224,11 @@ def detect_trees_from_lidar(
       4. Construct a fixed-radius bbox around each pixel center
       5. Clip bboxes to the image frame; drop zero-area results
       6. Synthesize confidence from peak height (taller → higher)
-      7. (Optional) verify each peak against a sliced RF-DETR run:
+      7. (Phase 11b, opt-in) Compute per-tree crown polygons via
+         watershed segmentation on the same CHM. Replaces the
+         fixed-radius bbox with a polygon-derived bbox for
+         consistency. Polygons stored in detections.data.
+      8. (Optional) verify each peak against a sliced RF-DETR run:
          drop peaks with no RF-DETR detection within the tolerance
 
     Args:
@@ -231,8 +237,18 @@ def detect_trees_from_lidar(
         image_size_px: (width, height) in pixels.
         crown_radius_m: Half-width of each detection bbox. Default
             2.5 (= 5 m diameter, published Mediterranean average).
+            Also used as the fallback circle radius when watershed
+            crown segmentation can't produce a basin.
         min_height_m: Minimum CHM peak height for a LiDAR tree-top
             to count. Default 5 m (Spanish Forest Inventory cutoff).
+        crown_segmentation: Phase 11b. If True, computes per-tree
+            crown polygons via watershed segmentation on the CHM
+            and stores them in `detections.data["crown_polygon"]`.
+            Replaces the fixed-radius bbox with a polygon-derived
+            bbox so the two stay consistent. Default False to
+            preserve Phase 11a behavior on existing callers.
+        max_crown_area_m2: Sanity cap on watershed basin area. Used
+            only when `crown_segmentation=True`. Default 200 m².
         rf_detr_verify: If True, drop LiDAR peaks that have NO
             matching RF-DETR detection within `rf_detr_verify_tolerance_m`.
             Default False (pure LiDAR output).
@@ -249,7 +265,12 @@ def detect_trees_from_lidar(
     Returns:
         sv.Detections with one bbox per surviving LiDAR peak. Empty
         if no peaks found or if all peaks were rejected. Never
-        raises on empty input.
+        raises on empty input. When `crown_segmentation=True`, the
+        Detections.data dict has two extra keys:
+          - "crown_polygon": list[shapely.geometry.Polygon] in
+            EPSG:25831, one per detection
+          - "lidar_height_m": float32 ndarray of peak heights,
+            useful for downstream allometric DBH (Phase 12b)
     """
     # Lazy imports to keep the top of detect.py clean and to avoid
     # a circular import if forest_pulse.lidar imports from detect.
@@ -314,19 +335,57 @@ def detect_trees_from_lidar(
     # Downstream filters can rank detections by height proxy.
     conf = np.clip((heights_kept - 5.0) / 20.0, 0.01, 1.0)
 
+    # ---- Stage 7 (Phase 11b, opt-in): watershed crown polygons ----
+    # When enabled, replaces the fixed-radius xyxy with a polygon-
+    # derived bbox so the two stay consistent. Polygons are stored
+    # in detections.data for downstream consumers (georef.py).
+    crown_polygons: list | None = None
+    if crown_segmentation:
+        from forest_pulse.crowns import segment_crowns_watershed
+        # Project the kept-positions back into a list-of-tuples for
+        # the watershed function. positions_arr was built earlier
+        # from the full input list; subset by the same `keep` mask.
+        positions_kept = [
+            (float(p[0]), float(p[1]))
+            for p in pos_arr[keep]
+        ]
+        crown_polygons = segment_crowns_watershed(
+            chm=chm,
+            transform=transform,
+            tree_tops_world=positions_kept,
+            min_height_m=min_height_m,
+            max_crown_area_m2=max_crown_area_m2,
+            fallback_radius_m=crown_radius_m,
+        )
+        # Recompute pixel xyxy from polygon bounds so the bbox column
+        # in the output GeoJSON matches the polygon shape.
+        xyxy = _polygons_to_pixel_bboxes(
+            crown_polygons,
+            image_bounds=image_bounds,
+            image_size_px=image_size_px,
+        )
+
     dets = sv.Detections(
         xyxy=xyxy.astype(np.float32),
         confidence=conf.astype(np.float32),
         class_id=np.zeros(len(xyxy), dtype=np.int64),
     )
 
+    if crown_polygons is not None:
+        # Store polygons + heights for downstream consumers (georef
+        # auto-detects "crown_polygon"; Phase 12b uses lidar_height_m
+        # for allometric DBH).
+        dets.data["crown_polygon"] = crown_polygons
+        dets.data["lidar_height_m"] = heights_kept.astype(np.float32)
+
     logger.info(
         "LiDAR-first detect: %d LiDAR peaks → %d detections "
-        "(crown_radius=%.1fm, min_height=%.1fm)",
+        "(crown_radius=%.1fm, min_height=%.1fm, crown_seg=%s)",
         len(positions), len(dets), crown_radius_m, min_height_m,
+        crown_segmentation,
     )
 
-    # ---- Stage 7 (optional): RF-DETR visual verification ----
+    # ---- Stage 8 (optional): RF-DETR visual verification ----
     if rf_detr_verify:
         if rf_detr_checkpoint is None or rf_detr_image is None:
             raise ValueError(
@@ -343,6 +402,47 @@ def detect_trees_from_lidar(
         )
 
     return dets
+
+
+def _polygons_to_pixel_bboxes(
+    polygons: list,
+    image_bounds: tuple[float, float, float, float],
+    image_size_px: tuple[int, int],
+) -> np.ndarray:
+    """Project shapely polygons (world coords) to pixel xyxy bboxes.
+
+    Used by Phase 11b's crown_segmentation path so the per-detection
+    bbox column in the output reflects the actual polygon extent
+    rather than a fixed radius. Polygons are in EPSG:25831; the
+    output is in image-pixel coords with the standard Y-inversion
+    (image row 0 = world y_max).
+
+    Args:
+        polygons: List of shapely.geometry.Polygon objects.
+        image_bounds: (x_min, y_min, x_max, y_max) in world meters.
+        image_size_px: (width, height) in pixels.
+
+    Returns:
+        (N, 4) float32 array of xyxy bboxes in pixel coords.
+    """
+    from forest_pulse.lidar import world_to_pixel
+
+    if not polygons:
+        return np.zeros((0, 4), dtype=np.float32)
+
+    bboxes = np.zeros((len(polygons), 4), dtype=np.float32)
+    w_px, h_px = image_size_px
+    for i, poly in enumerate(polygons):
+        minx, miny, maxx, maxy = poly.bounds
+        # Y is inverted: world y_max → pixel row 0 (top of image),
+        # world y_min → pixel row h_px (bottom).
+        x1, y_top = world_to_pixel(minx, maxy, image_bounds, image_size_px)
+        x2, y_bot = world_to_pixel(maxx, miny, image_bounds, image_size_px)
+        bboxes[i, 0] = max(0.0, min(x1, w_px))
+        bboxes[i, 1] = max(0.0, min(y_top, h_px))
+        bboxes[i, 2] = max(0.0, min(x2, w_px))
+        bboxes[i, 3] = max(0.0, min(y_bot, h_px))
+    return bboxes
 
 
 def _verify_with_rf_detr(

@@ -279,6 +279,81 @@ def test_detect_from_lidar_rf_detr_verify_requires_image(monkeypatch):
         )
 
 
+# ============================================================
+# Phase 11b — crown_segmentation integration
+# ============================================================
+
+
+def test_crown_segmentation_default_off_no_data_keys(monkeypatch):
+    """When crown_segmentation=False (default), the data dict has
+    NO crown_polygon and NO lidar_height_m. Phase 11a back-compat.
+    """
+    _stub_lidar_pipeline(
+        monkeypatch,
+        positions=[(80.0, 80.0)],
+        heights=[15.0],
+    )
+    dets = detect_trees_from_lidar(
+        laz_path="/fake.laz",
+        image_bounds=(0.0, 0.0, 160.0, 160.0),
+        image_size_px=(640, 640),
+    )
+    assert "crown_polygon" not in dets.data
+    assert "lidar_height_m" not in dets.data
+
+
+def test_crown_segmentation_on_stores_polygons_and_heights(monkeypatch):
+    """When crown_segmentation=True, the data dict has crown_polygon
+    (list of shapely Polygons) and lidar_height_m (float32 ndarray).
+    Both have the same length as the detections.
+    """
+    from shapely.geometry import Polygon
+
+    _stub_lidar_pipeline(
+        monkeypatch,
+        positions=[(40.0, 40.0), (120.0, 120.0)],
+        heights=[10.0, 18.0],
+    )
+
+    # Stub the watershed segmentation to return two known polygons.
+    # The real watershed needs a real CHM with non-trivial data; we
+    # just want to verify the wiring stores the polygons.
+    fake_polygons = [
+        Polygon([(35, 35), (45, 35), (45, 45), (35, 45)]),
+        Polygon([(115, 115), (125, 115), (125, 125), (115, 125)]),
+    ]
+    import forest_pulse.crowns as crowns_mod
+    monkeypatch.setattr(
+        crowns_mod, "segment_crowns_watershed",
+        lambda **kwargs: fake_polygons,
+    )
+
+    dets = detect_trees_from_lidar(
+        laz_path="/fake.laz",
+        image_bounds=(0.0, 0.0, 160.0, 160.0),
+        image_size_px=(640, 640),
+        crown_segmentation=True,
+    )
+    assert len(dets) == 2
+    assert "crown_polygon" in dets.data
+    assert "lidar_height_m" in dets.data
+    assert len(dets.data["crown_polygon"]) == 2
+    assert len(dets.data["lidar_height_m"]) == 2
+    # Polygons are the ones we returned from the stub
+    assert dets.data["crown_polygon"][0] is fake_polygons[0]
+    assert dets.data["crown_polygon"][1] is fake_polygons[1]
+    # Heights stored as float32
+    assert dets.data["lidar_height_m"].dtype == np.float32
+    assert abs(dets.data["lidar_height_m"][0] - 10.0) < 1e-5
+    assert abs(dets.data["lidar_height_m"][1] - 18.0) < 1e-5
+    # bbox columns recomputed from polygon bounds (not fixed radius)
+    # Polygon 0 spans world (35, 35) to (45, 45) → 10m × 10m
+    # In pixel coords at 4 px/m, that's a 40×40 pixel bbox
+    bbox0 = dets.xyxy[0]
+    assert abs((bbox0[2] - bbox0[0]) - 40.0) < 1e-3
+    assert abs((bbox0[3] - bbox0[1]) - 40.0) < 1e-3
+
+
 def test_detect_from_lidar_rf_detr_verify_drops_unmatched(monkeypatch):
     """rf_detr_verify drops LiDAR peaks RF-DETR doesn't see."""
     _stub_lidar_pipeline(
