@@ -1,36 +1,45 @@
 ## Current State
 
-Phase: 12a COMPLETE — broadleaf/conifer species classification (free)
-Model:  detect_trees_from_lidar + crown_segmentation + extract_lidar_features
-        → inventory_montseny classifies species globally via
-        classify_broadleaf_conifer (unsupervised z-score + percentile)
-Eval:   10-patch reference set; 3320 trees, now enriched with species group.
-        Global split: 60.00% broadleaf / 40.00% conifer (matches Montseny IEFC
-        prior EXACTLY, by construction).
-        Per-zone variance (from 32% to 94% broadleaf) — huge and
-        ecologically sensible:
-          nw_plateau 94%  /  high 86%  /  summit 83%  /  ne_slopes 80%
-             (north-facing, high-elevation → broadleaf-dominant)
-          mid 45%
-          se_ridge 39%  /  low 38%  /  sw_valley 32%
-             (south-facing, valley → conifer-dominant)
-        Independent ecological validation: broadleaves have mean crown
-        area 24.6 m² vs conifers 13.0 m² (Phase 11b polygons); conifers
-        mean height 18.0 m vs broadleaves 16.8 m. All signals match
-        published Mediterranean patterns.
-        Runtime regression: 268s for 10 patches (vs 1.2s Phase 11b)
-        because extract_lidar_features does O(N*D) point-in-bbox checks
-        per patch. Full park run now ~6 hours (vs 2 min). Optimization
-        opportunity (spatial index) deferred as follow-up.
-Next:   Phase 11a + 11b + 12a SHIPPED. Remaining ROADMAP items:
-          Phase 12b (3h)  — Allometric DBH + biomass with error bars ← NEXT
-                            (uses Phase 12a species + 11a height + 11b area)
+Phase: 12b COMPLETE — 3-week sprint complete, parameterized forest inventory
+Model:  detect_trees_from_lidar → crown_segmentation → extract_lidar_features
+        → classify_broadleaf_conifer → estimate_tree_metrics_batch
+        (pure numpy, no ML, Jucker + Ruiz-Peinado allometrics)
+Eval:   10-patch reference set; 3320 trees, each with:
+          - location (world + crown polygon)
+          - crown_area_m2 (from Phase 11b watershed)
+          - species_group (Phase 12a broadleaf/conifer)
+          - lidar_height_p95 (Phase 11a CHM peak)
+          - dbh_cm_estimate + dbh_cm_ci (Phase 12b, ±30% per-tree)
+          - biomass_kg_estimate + biomass_kg_ci (Phase 12b, ±40% per-tree)
+          - health_label (Phase 5 RGB scoring)
+        Park total: 1444 tonnes AGB, 56.4 t/ha average.
+        Per-zone biomass (matches ecological gradient perfectly):
+          nw_plateau  190.6 t/ha  (dense broadleaf — mature beech/oak)
+          summit      118.2 t/ha  (beech at elevation)
+          ne_slopes    49.4 t/ha  / low 41.3 t/ha / mid 31.9 t/ha
+          high         28.0 t/ha  / sw_valley 26.7 / se_ridge 18.0
+        Per-species DBH: broadleaf mean 21.4 cm (median 17.4), conifer
+        mean 14.2 cm (median 10.3). Max 121 cm on a 26m/195m² mature
+        broadleaf — plausible for old-growth Fagus in Montseny.
+        Runtime: 266s for 10 patches (Phase 12b adds negligible
+        overhead on top of 12a; bottleneck is still extract_lidar_features).
+        Full park run ~6 hours (spatial-index optimization deferred).
+Next:   3-WEEK SPRINT COMPLETE. Forest Pulse is now a parameterized
+        Mediterranean forest inventory system. Remaining ROADMAP items
+        are OPTIONAL enhancements, not core functionality:
           Phase 11c (opt) — SAM2 point-prompted crown refinement
           Phase 12c (opt) — Full species classifier with hand-labels
-          Phase 13 (opt)  — Drone imagery acquisition for higher F1 ceiling
+                            (would replace 12a binary with 5-10 class
+                             genus labels, enabling per-species DBH)
+          Phase 13 (opt)  — Drone imagery acquisition for higher F1
         Performance follow-up: optimize extract_lidar_features with a
         spatial index (KD-tree or voxel grid) to cut per-patch runtime
-        from 26.8s → ~0.3s. Cleanup, not a correctness issue.
+        from 26.6s → ~0.3s. Would restore Phase 11b's 2-minute
+        full-park-run envelope. Pure perf optimization, not
+        correctness.
+        Phase 14 candidate: temporal change detection via
+        forest_pulse.temporal (already exists from Phase 5) diffing
+        two inventory runs to find new/lost/stressed trees.
 
 ## Completed
 

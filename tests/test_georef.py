@@ -4,6 +4,7 @@ import numpy as np
 import supervision as sv
 from shapely.geometry import Point, Polygon
 
+from forest_pulse.allometry import TreeMetrics
 from forest_pulse.georef import georeference
 from forest_pulse.health import HealthScore
 
@@ -131,6 +132,39 @@ def test_georef_without_species_groups_no_column():
     bounds = (0.0, 0.0, 160.0, 160.0)
     gdf = georeference(dets, bounds, (640, 640))
     assert "species_group" not in gdf.columns
+
+
+def test_georef_with_tree_metrics_adds_dbh_biomass_columns():
+    """Phase 12b: tree_metrics → 4 DBH/biomass columns."""
+    dets = _make_dets(3)
+    bounds = (0.0, 0.0, 160.0, 160.0)
+    metrics = [
+        TreeMetrics(dbh_cm=20.5, dbh_cm_ci=6.15,
+                    biomass_kg=180.0, biomass_kg_ci=72.0),
+        TreeMetrics(dbh_cm=15.2, dbh_cm_ci=4.56,
+                    biomass_kg=95.0, biomass_kg_ci=38.0),
+        TreeMetrics(dbh_cm=30.1, dbh_cm_ci=9.03,
+                    biomass_kg=410.0, biomass_kg_ci=164.0),
+    ]
+    gdf = georeference(dets, bounds, (640, 640), tree_metrics=metrics)
+
+    assert "dbh_cm_estimate" in gdf.columns
+    assert "dbh_cm_ci" in gdf.columns
+    assert "biomass_kg_estimate" in gdf.columns
+    assert "biomass_kg_ci" in gdf.columns
+
+    assert gdf["dbh_cm_estimate"].iloc[0] == 20.5
+    assert gdf["biomass_kg_estimate"].iloc[1] == 95.0
+    assert gdf["biomass_kg_ci"].iloc[2] == 164.0
+
+
+def test_georef_without_tree_metrics_no_dbh_columns():
+    """Back-compat: no tree_metrics → no DBH/biomass columns."""
+    dets = _make_dets(3)
+    bounds = (0.0, 0.0, 160.0, 160.0)
+    gdf = georeference(dets, bounds, (640, 640))
+    assert "dbh_cm_estimate" not in gdf.columns
+    assert "biomass_kg_estimate" not in gdf.columns
 
 
 def test_georef_uses_crown_polygons_when_present():

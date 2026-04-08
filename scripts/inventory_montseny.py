@@ -61,6 +61,7 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 
+from forest_pulse.allometry import estimate_tree_metrics_batch
 from forest_pulse.detect import detect_trees_from_lidar, detect_trees_sliced
 from forest_pulse.export import to_csv, to_geojson
 from forest_pulse.georef import georeference
@@ -415,6 +416,29 @@ def run_inventory(
         # classify on. Leave species_group absent.
         pass
 
+    # Phase 12b: allometric DBH + biomass per tree. Uses:
+    #   - species_group (from Phase 12a)
+    #   - lidar_height_p95 (from Phase 11a CHM peaks)
+    #   - crown_area_m2 (from Phase 11b watershed polygons)
+    # Applies Jucker-style crown-to-DBH + Ruiz-Peinado-style
+    # DBH-to-biomass with species-specific coefficients. Per-tree
+    # CI is ±30% on DBH and ±40% on biomass (published residuals).
+    if all(c in dedup.columns for c in
+           ("species_group", "lidar_height_p95", "crown_area_m2")):
+        metrics = estimate_tree_metrics_batch(
+            species_groups=dedup["species_group"].to_list(),
+            heights_m=dedup["lidar_height_p95"].to_numpy(),
+            crown_areas_m2=dedup["crown_area_m2"].to_numpy(),
+        )
+        dedup["dbh_cm_estimate"] = [round(m.dbh_cm, 2) for m in metrics]
+        dedup["dbh_cm_ci"] = [round(m.dbh_cm_ci, 2) for m in metrics]
+        dedup["biomass_kg_estimate"] = [
+            round(m.biomass_kg, 2) for m in metrics
+        ]
+        dedup["biomass_kg_ci"] = [
+            round(m.biomass_kg_ci, 2) for m in metrics
+        ]
+
     # Export.
     geojson_path = OUTPUT_DIR / "montseny_trees.geojson"
     csv_path = OUTPUT_DIR / "montseny_trees.csv"
@@ -454,6 +478,41 @@ def run_inventory(
         print("  Species distribution:")
         print(f"    broadleaf      {n_bl}  ({bl_frac * 100:.1f}%)")
         print(f"    conifer        {n_cf}  ({(1 - bl_frac) * 100:.1f}%)")
+
+    # Phase 12b: DBH + biomass stats per species, plus per-zone totals.
+    if "dbh_cm_estimate" in dedup.columns:
+        print()
+        print("  DBH per species (cm):")
+        for species in (SPECIES_GROUP_BROADLEAF, SPECIES_GROUP_CONIFER):
+            subset = dedup[dedup["species_group"] == species]
+            if len(subset) == 0:
+                continue
+            dbh = subset["dbh_cm_estimate"]
+            print(
+                f"    {species:<10} n={len(subset):4d}  "
+                f"mean={dbh.mean():5.1f}  "
+                f"median={dbh.median():5.1f}  "
+                f"range=[{dbh.min():.1f}, {dbh.max():.1f}]"
+            )
+        print()
+        print("  Per-zone biomass (above-ground, Phase 12b allometrics):")
+        for zone, zone_df in dedup.groupby("source_zone"):
+            n_patches = zone_df["source_patch"].nunique()
+            ha = n_patches * 2.56  # 160m x 160m = 2.56 ha per patch
+            total_kg = zone_df["biomass_kg_estimate"].sum()
+            t_per_ha = (total_kg / 1000.0) / ha
+            print(
+                f"    {str(zone):<14} "
+                f"{total_kg / 1000.0:7.1f} t  "
+                f"({t_per_ha:5.1f} t/ha)"
+            )
+        park_total_kg = dedup["biomass_kg_estimate"].sum()
+        park_area_ha = len(per_patch_gdfs) * 2.56
+        print(
+            f"    {'PARK TOTAL':<14} "
+            f"{park_total_kg / 1000.0:7.1f} t  "
+            f"({park_total_kg / 1000.0 / park_area_ha:5.1f} t/ha)"
+        )
         print()
         print("  Per-zone species fractions:")
         for zone, zone_df in dedup.groupby("source_zone"):

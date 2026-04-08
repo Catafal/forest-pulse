@@ -38,6 +38,7 @@ import pandas as pd
 import supervision as sv
 from shapely.geometry import Point
 
+from forest_pulse.allometry import TreeMetrics
 from forest_pulse.health import HealthScore
 from forest_pulse.lidar import LiDARFeatures
 
@@ -56,6 +57,12 @@ _HEALTH_COLUMNS = ["health_label", "grvi", "exg", "health_confidence"]
 # Phase 12a: extra column emitted when species_groups are provided.
 _SPECIES_COLUMNS = ["species_group"]
 
+# Phase 12b: extra columns emitted when tree_metrics are provided.
+_DBH_BIOMASS_COLUMNS = [
+    "dbh_cm_estimate", "dbh_cm_ci",
+    "biomass_kg_estimate", "biomass_kg_ci",
+]
+
 # Extra columns emitted when lidar_features are provided.
 _LIDAR_COLUMNS = [
     "lidar_height_p95", "lidar_height_p50", "lidar_vertical_spread",
@@ -71,6 +78,7 @@ def georeference(
     health_scores: list[HealthScore] | None = None,
     lidar_features: list[LiDARFeatures] | None = None,
     species_groups: list[str] | None = None,
+    tree_metrics: list[TreeMetrics] | None = None,
     crs: str = "EPSG:25831",
 ) -> gpd.GeoDataFrame:
     """Convert pixel-space detections to a GeoDataFrame.
@@ -122,6 +130,8 @@ def georeference(
         columns += _HEALTH_COLUMNS
     if species_groups is not None:
         columns += _SPECIES_COLUMNS
+    if tree_metrics is not None:
+        columns += _DBH_BIOMASS_COLUMNS
     if lidar_features is not None:
         columns += _LIDAR_COLUMNS
 
@@ -195,6 +205,19 @@ def georeference(
         if species_groups is not None:
             row["species_group"] = (
                 species_groups[i] if i < len(species_groups) else "unknown"
+            )
+
+        # Phase 12b: DBH + biomass columns from estimate_tree_metrics.
+        # Out-of-range indices get zeros to keep stand-level sums valid.
+        if tree_metrics is not None:
+            tm = tree_metrics[i] if i < len(tree_metrics) else None
+            row["dbh_cm_estimate"] = round(tm.dbh_cm, 2) if tm else 0.0
+            row["dbh_cm_ci"] = round(tm.dbh_cm_ci, 2) if tm else 0.0
+            row["biomass_kg_estimate"] = (
+                round(tm.biomass_kg, 2) if tm else 0.0
+            )
+            row["biomass_kg_ci"] = (
+                round(tm.biomass_kg_ci, 2) if tm else 0.0
             )
 
         if lidar_features is not None:
