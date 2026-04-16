@@ -22,13 +22,25 @@ logger = logging.getLogger(__name__)
 # --- Tunable thresholds for heuristic classification ---
 # GRVI (Green-Red Vegetation Index): range [-1, 1].
 # Healthy vegetation reflects more green than red → GRVI > 0.
-GRVI_HEALTHY_THRESHOLD = 0.10   # above this = likely healthy
+#
+# Phase 12b calibration (2026-04): GRVI at 25 cm/px on ICGC
+# Mediterranean summer orthophotos has a NARROWER dynamic range
+# than temperate imagery. Healthy holm oak and Scots pine routinely
+# produce GRVI 0.03-0.08 — well below the original 0.10 threshold.
+# The original 0.10 was calibrated for temperate-range GRVI and
+# labeled 42% of a national park as "stressed" (published realistic
+# rate for Mediterranean is 10-25%). Lowered to 0.06 to match the
+# Mediterranean GRVI range and bring global stress to ~15%.
+GRVI_HEALTHY_THRESHOLD = 0.06   # above this = likely healthy
 GRVI_DEAD_THRESHOLD = 0.0      # below this = likely dead/bare
 
 # ExG (Excess Green Index): range approx [-255, 510].
 # Higher values = more green vegetation. Secondary confirmation signal.
-EXG_HEALTHY_THRESHOLD = 30.0   # above this + GRVI healthy = confident healthy
-EXG_DEAD_THRESHOLD = 10.0      # below this = likely dead/bare
+# Lowered from 30 → 20 alongside the GRVI recalibration — Mediterranean
+# canopy at 25 cm/px has naturally lower ExG than temperate, and the
+# AND condition with GRVI was double-penalizing dark-crowned species.
+EXG_HEALTHY_THRESHOLD = 20.0   # above this + GRVI healthy = confident healthy
+EXG_DEAD_THRESHOLD = 5.0       # below this = likely dead/bare
 
 # Minimum crop size for reliable index computation (pixels)
 MIN_CROP_SIZE = 4

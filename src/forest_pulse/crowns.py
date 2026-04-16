@@ -66,11 +66,17 @@ logger = logging.getLogger(__name__)
 # everywhere else in the project.
 DEFAULT_MIN_CROWN_HEIGHT_M = 5.0
 
-# Sanity cap on per-tree crown area. A 16 m diameter tree has ~200 m²
-# crown — already on the high end for Mediterranean species. Anything
-# larger is almost certainly merged-canopy over-segmentation; replace
-# with a fallback circle.
-DEFAULT_MAX_CROWN_AREA_M2 = 200.0
+# Sanity cap on per-tree crown area. 150 m² ≈ 14 m diameter — the
+# upper end of realistic individual crowns for any Montseny species
+# including mature Fagus sylvatica (beech). Published max crown
+# diameters: beech 12-16 m, holm oak 8-12 m, Pinus halepensis 6-10 m.
+#
+# Phase 12b calibration: the original 200 m² cap allowed 2,098
+# over-segmented basins (0.92% of trees) that produced biologically
+# implausible DBH (> 100 cm for conifers whose published max is
+# 60-80 cm). Lowered to 150 m² to catch these while still allowing
+# legitimate large beech / oak crowns.
+DEFAULT_MAX_CROWN_AREA_M2 = 150.0
 
 # Radius of the fallback circle when watershed can't produce a valid
 # basin. Matches the Phase 11a fixed-radius default of 2.5 m.
