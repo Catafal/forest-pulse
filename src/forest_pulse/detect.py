@@ -203,7 +203,7 @@ def detect_trees_from_lidar(
     crown_radius_m: float = 2.5,
     min_height_m: float = 5.0,
     crown_segmentation: bool = False,
-    max_crown_area_m2: float = 200.0,
+    max_crown_area_m2: float = 150.0,
     extract_lidar_features: bool = False,
     rf_detr_verify: bool = False,
     rf_detr_checkpoint: str | None = None,
