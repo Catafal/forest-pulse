@@ -77,6 +77,10 @@ A 6 m window diameter (3 m radius) was chosen to match the minimum expected crow
 
 We evaluated two detection paradigms on a fixed 10-patch reference set containing 3,320 LiDAR-derived tree-tops. We note that the reference set is small (10 patches out of 800), and F1 estimates carry variance at this sample size; the full 783-patch inventory (Section 4) serves as the scale validation.
 
+The two paradigms are illustrated in Figure 2.
+
+![Figure 2: Pipeline comparison. (a) RF-DETR primary with LiDAR filter. (b) Classical LiDAR detection with watershed crowns, species classification, and allometry.](figures/fig2_architecture.png)
+
 **Paradigm A: Visual detector with LiDAR filter.** RF-DETR (DINOv2 backbone, fine-tuned on DeepForest-generated weak labels, Weinstein et al., 2019) detects trees in RGB patches. A deterministic LiDAR filter drops detections whose bbox center has no CHM peak within 2 m. We progressively optimized the inference configuration:
 
 | Configuration | Predictions | TP | Precision | Recall | F1 |
@@ -86,17 +90,13 @@ We evaluated two detection paradigms on a fixed 10-patch reference set containin
 | + Confidence sweep (conf=0.02) | 700 | 505 | 0.721 | 0.152 | 0.252 |
 | + Sliced inference (9 × 320px) | 2,247 | 1,356 | 0.604 | 0.408 | 0.487 |
 
-The confidence sweep, which lowers the detector's threshold from 0.30 to 0.02 and reapplies the filter, produced a 2.3× F1 improvement with zero retraining. Sliced inference, which runs the detector on 9 overlapping 320 × 320 sub-windows per patch and merges via NMS, added a further 1.9× by allowing each sub-window its own 300-query budget, effectively improving the resolution at which the detector sees each crown.
-
-The F1 progression across successive optimizations is shown in Figure 3.
+The confidence sweep, which lowers the detector's threshold from 0.30 to 0.02 and reapplies the filter, produced a 2.3× F1 improvement with zero retraining. Sliced inference, which runs the detector on 9 overlapping 320 × 320 sub-windows per patch and merges via NMS, added a further 1.9× by allowing each sub-window its own 300-query budget, effectively improving the resolution at which the detector sees each crown. The F1 progression across successive optimizations is shown in Figure 3.
 
 ![Figure 3: Detection performance evolution across four RF-DETR operating points on the 10-patch reference set.](figures/fig3_f1_progression.png)
 
-**Paradigm B: Classical LiDAR detection (adopted for production).** LiDAR tree-tops from Section 3.2 serve directly as the detector; each peak becomes one detection with a fixed 2.5 m radius bounding box. Because the detections are identical to the reference tree-tops by construction, the F1 metric is uninformative for this paradigm. We therefore validate the LiDAR-based inventory via ecological plausibility (Section 4.1), independent crown-area analysis (Section 4.2), and cross-paradigm consistency (Section 4.3).
+**Paradigm B: Classical LiDAR detection (adopted for production).** LiDAR tree-tops from Section 3.2 serve directly as the detector; each peak becomes one detection with a fixed 2.5 m radius bounding box. Because the detections are identical to the reference tree-tops by construction (that is, the detector output and the evaluation reference are derived from the same CHM local-maximum extraction, making them numerically identical), the F1 metric is uninformative for this paradigm. We therefore validate the LiDAR-based inventory via ecological plausibility (Section 4.1), independent crown-area analysis (Section 4.2), and cross-paradigm consistency (Section 4.3).
 
 This paradigm is conceptually equivalent to the well-established LiDAR-based ITD pipelines described by Popescu and Wynne (2004), Hyyppä et al. (2001), and Koch et al. (2006). Its adoption here is motivated not by methodological novelty but by the empirical finding that it outperforms the visual detector in completeness (Section 4.3) and speed (0.2 s vs. 8.1 s for 10 patches) for this specific ecological context.
-
-![Figure 2: Pipeline comparison. (a) RF-DETR primary with LiDAR filter. (b) Classical LiDAR detection with watershed crowns, species classification, and allometry.](figures/fig2_architecture.png)
 
 ### 3.4 Crown segmentation
 
@@ -134,11 +134,11 @@ AGB (kg) = c × DBH^d
 | Broadleaf | 0.56 | 0.63 | 0.22 | 2.36 |
 | Conifer | 0.48 | 0.65 | 0.085 | 2.49 |
 
-Coefficients are representative values derived from the European temperate calibration in Jucker et al. (2017) and the Mediterranean species equations in Ruiz-Peinado et al. (2011, 2012). They are not site-calibrated to Montseny. Per-tree confidence intervals are fixed at ±30% for DBH and ±40% for biomass, following the reported RMSE ranges in Jucker et al. (2017, Table S2) and Ruiz-Peinado et al. (2011, Table 3). Stand-level aggregates converge to approximately ±10 to 15% as individual errors average out (Breidenbach and Astrup, 2012; Forrester et al., 2017).
+Coefficients are representative values derived from the European temperate calibration in Jucker et al. (2017) and the Mediterranean species equations in Ruiz-Peinado et al. (2011, 2012), following the general allometric framework reviewed by Chave et al. (2014). They are not site-calibrated to Montseny. Per-tree confidence intervals are fixed at ±30% for DBH and ±40% for biomass, following the reported RMSE ranges in Jucker et al. (2017, Table S2) and Ruiz-Peinado et al. (2011, Table 3). Stand-level aggregates converge to approximately ±10 to 15% as individual errors average out (Breidenbach and Astrup, 2012; Forrester et al., 2017).
 
 ### 3.7 Health scoring
 
-GRVI (Green-Red Vegetation Index, (G−R)/(G+R)) and ExG (Excess Green Index, 2G−R−B) are computed on each tree's RGB bounding-box crop. Trees are classified as healthy (GRVI > 0.06 AND ExG > 20), dead (GRVI < 0 OR ExG < 5), or stressed (otherwise). Thresholds were recalibrated from initial temperate-range values (GRVI > 0.10) after observing that Mediterranean canopy at 25 cm/px produces a narrower GRVI dynamic range (typically 0.02 to 0.15 for healthy vegetation), consistent with the lower green-to-red ratio of evergreen Mediterranean species compared to deciduous temperate canopy.
+GRVI (Green-Red Vegetation Index, (G−R)/(G+R), a simplified RGB analogue of NDVI; Tucker, 1979) and ExG (Excess Green Index, 2G−R−B; Woebbecke et al., 1995) are computed on each tree's RGB bounding-box crop. Trees are classified as healthy (GRVI > 0.06 AND ExG > 20), dead (GRVI < 0 OR ExG < 5), or stressed (otherwise). Thresholds were recalibrated from initial temperate-range values (GRVI > 0.10) after observing that Mediterranean canopy at 25 cm/px produces a narrower GRVI dynamic range (typically 0.02 to 0.15 for healthy vegetation), consistent with the lower green-to-red ratio of evergreen Mediterranean species compared to deciduous temperate canopy.
 
 ## 4. Results
 
@@ -160,7 +160,7 @@ The LiDAR-based pipeline processed 783 of 800 patches (2,004 ha), detecting 228,
 | sw_valley | 23,455 | 25.9 | 45.0 | 20.4 |
 | **Total** | **228,675** | **60.0** | **48.0** | **14.3** |
 
-Park-wide AGB of 48.0 t/ha falls slightly below the 50 to 90 t/ha range reported by Vayreda et al. (2012) for Catalan forests. This is expected because our inventory includes all trees ≥ 5 m, including small understory individuals that contribute minimally to biomass but substantially dilute the per-hectare average. In our data, 50% of trees have DBH < 15 cm and contribute only 3.2% of total AGB, consistent with the 5 to 15% reported by Montero et al. (2005) for Mediterranean stands. Per-zone species fractions and biomass densities are shown in Figure 4.
+Park-wide AGB of 48.0 t/ha falls slightly below the 50 to 90 t/ha range reported by Vayreda et al. (2012) for Catalan forests and the 40 to 150 t/ha reported across Spanish Mediterranean forests by Moreno-Fernandez et al. (2018). This is expected because our inventory includes all trees ≥ 5 m, including small understory individuals that contribute minimally to biomass but substantially dilute the per-hectare average. In our data, 50% of trees have DBH < 15 cm and contribute only 3.2% of total AGB, consistent with the 5 to 15% reported by Montero et al. (2005) for Mediterranean stands. Per-zone species fractions and biomass densities are shown in Figure 4.
 
 ![Figure 4: Per-zone species composition (a) and biomass density (b) across the 8 Montseny sampling zones.](figures/fig4_zone_species_biomass.png)
 
@@ -216,14 +216,15 @@ This finding suggests a general diagnostic for practitioners: before investing i
 2. **Health labels** are relative indicators based on RGB GRVI, not calibrated against field-measured tree vitality. The 14.3% park-wide stress rate and per-zone gradient are ecologically plausible but should be treated as a proxy for within-park comparison, not an absolute diagnosis.
 3. **Species classification** is binary (broadleaf/conifer), sufficient for allometric differentiation but not for per-species management. Genus-level classification would require hand-labeled training examples or multispectral/hyperspectral imagery.
 4. **Allometric coefficients** are representative Mediterranean averages, not site-calibrated to Montseny. Per-tree DBH accuracy is ±30%; stand-level accuracy is ±10 to 15% (Breidenbach and Astrup, 2012). Ground-truth calibration on measured trees would improve accuracy.
-5. **Temporal mismatch** between LiDAR (2021 to 2023) and orthophotos introduces potential inconsistencies for recently disturbed stands. For the mature forests of Montseny, this effect is minor at the 5 m height threshold.
-6. **External benchmark.** We compared detection paradigms within our pipeline but did not benchmark against established external ITD implementations (lidR, DeepForest, ForestTools). Future work should include such comparisons on the same reference set to establish broader generalizability.
+5. **Crown polygon quality.** Watershed segmentation produces fallback circular polygons for 16% of trees where basins are empty or over-segmented. Point-prompted segmentation models such as SAM 2 (Ravi et al., 2024) could improve polygon quality for these cases, particularly in dense canopy where watershed basins are most prone to over-segmentation.
+6. **Temporal mismatch** between LiDAR (2021 to 2023) and orthophotos introduces potential inconsistencies for recently disturbed stands. For the mature forests of Montseny, this effect is minor at the 5 m height threshold.
+7. **External benchmark.** We compared detection paradigms within our pipeline but did not benchmark against established external ITD implementations (lidR, DeepForest, ForestTools). Future work should include such comparisons on the same reference set to establish broader generalizability.
 
 ## 6. Conclusions
 
 We present a systematic comparison of visual deep learning detection (RF-DETR) against classical LiDAR-based individual tree detection for Mediterranean forests, and demonstrate a complete park-scale inventory of 228,675 trees across Parc Natural del Montseny. The key contributions are:
 
-1. **A quantified paradigm comparison** showing that classical LiDAR-based ITD recovers 57% more trees than the best-tuned RF-DETR configuration, at 40× lower computational cost, for Mediterranean forests at 25 cm/px imagery resolution. This finding provides decision criteria for practitioners choosing between detection approaches.
+1. **A quantified paradigm comparison** showing that classical LiDAR-based ITD recovers 57% more trees than the best-tuned RF-DETR configuration, at 40× lower computational cost, for Mediterranean forests at 25 cm/px imagery resolution. As discussed in Section 4.3, this comparison is structurally asymmetric because the LiDAR detector's output is identical to the evaluation reference; the finding reflects completeness relative to the LiDAR reference rather than a symmetric benchmark. Nonetheless, the practical implication for practitioners choosing between detection approaches is clear.
 2. **An unsupervised species classification** using two well-documented LiDAR features (return ratio and intensity, as described by Ørka et al., 2009) that reproduces the known Montseny ecological gradient with zero training data. The per-zone broadleaf fractions (25.9% to 88.9%) are independently validated by crown area differences between the two classes.
 3. **Documentation of negative results** (an RGB-distilled classifier that failed, a model capacity probe that misidentified the bottleneck) that provide practical diagnostic guidance for practitioners working with combined optical-LiDAR pipelines.
 
@@ -259,4 +260,8 @@ All input data is publicly available from the Institut Cartografic i Geologic de
 - Vayreda, J. et al. (2012). Recent climate changes interact with stand structure and management to determine changes in tree carbon stocks in Spanish forests. _Global Change Biology_, 18(3), 1028-1041.
 - Weinstein, B.G. et al. (2019). Individual tree-crown detection in RGB imagery using semi-supervised deep learning. _Remote Sensing_, 11(11), 1309.
 - Weinstein, B.G. et al. (2021). A remote sensing derived data set of 100 million individual tree crowns for the National Ecological Observatory Network. _eLife_, 10, e62922.
+- Tucker, C.J. (1979). Red and photographic infrared linear combinations for monitoring vegetation. _Remote Sensing of Environment_, 8(2), 127-150.
+- Woebbecke, D.M. et al. (1995). Color indices for weed identification under various soil, residue, and lighting conditions. _Transactions of the ASAE_, 38(1), 259-269.
+- Moreno-Fernandez, D. et al. (2018). Carbon stocks and dynamics in Spanish forests: a review. _Forest Systems_, 27(2), eR04S.
+- Chave, J. et al. (2014). Improved allometric models to estimate the aboveground biomass of tropical trees. _Global Change Biology_, 20(10), 3177-3190.
 - Zhen, Z. et al. (2016). Trends in automatic individual tree crown detection and delineation. _International Journal of Remote Sensing_, 37(21), 4981-5003.
