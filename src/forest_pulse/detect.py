@@ -1,13 +1,30 @@
-"""Tree crown detection from aerial RGB imagery.
+"""Tree detection from aerial imagery and/or LiDAR.
 
-Wraps detection models and returns Supervision Detections for downstream processing.
-Supports:
-  - DeepForest pretrained (RetinaNet backbone) — quick demo, American forests
-  - RF-DETR pretrained (DINOv2 backbone) — SOTA, no fine-tuning
-  - RF-DETR from checkpoint — fine-tuned on your own data (the goal)
-  - Sliced inference (`detect_trees_sliced`) — Phase 10c, sidesteps
-    rfdetr's per-call 300-query cap by running on overlapping
-    sub-windows and merging with NMS
+Three public detectors, each for a different deployment scenario:
+
+  detect_trees_from_lidar(laz_path, bounds, size, ...)
+      The PRODUCTION detector for Catalunya / ICGC LiDAR regions.
+      Phase 11a+. LiDAR tree-tops are the primary oracle; each CHM
+      peak becomes one detection. Optional watershed crown polygons
+      (Phase 11b), per-tree LiDAR features (Phase 12a), and RF-DETR
+      visual verification. Use with `--detector lidar-first` in
+      `scripts/inventory_montseny.py`.
+
+  detect_trees_sliced(image, model_name, confidence, slice_wh, ...)
+      The FALLBACK detector for non-LiDAR regions (drone, non-Catalunya).
+      Phase 10c. Runs RF-DETR on overlapping sub-windows of the input
+      image, merges across tiles with NMS. Combined with the 9.5a
+      LiDAR filter on Catalunya, achieves F1 = 0.487 on the
+      reference set. Use with `--detector sliced`.
+
+  detect_trees(image, model_name, confidence)
+      The ORIGINAL Phase 1 detector. Single-pass RF-DETR or DeepForest
+      on a full image. No slicing, no LiDAR. Retained for backward
+      compatibility, quick demos, and as the per-tile callback inside
+      detect_trees_sliced.
+
+All three return sv.Detections with xyxy bboxes in the input image's
+pixel coordinate frame.
 """
 
 from __future__ import annotations
