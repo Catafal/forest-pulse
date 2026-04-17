@@ -2,7 +2,7 @@
 
 **Jordi Catafal**
 
-Corresponding author: jordicatafal@skill-ia.com
+Corresponding author: jordi.catafal@estudiantat.upc.edu
 
 ---
 
@@ -19,7 +19,7 @@ Individual tree detection in dense Mediterranean forests remains challenging for
 Individual tree detection (ITD) from remote sensing data is a prerequisite for modern forest inventory, carbon stock estimation, and ecological monitoring at landscape scales. While substantial progress has been made on ITD in boreal and temperate forests using both optical imagery and airborne LiDAR (Zhen et al., 2016; Weinstein et al., 2019; Eysn et al., 2015), Mediterranean forests present specific challenges that limit the performance of visual detection approaches:
 
 1. **Crown merging at standard resolution.** At 25 cm/px, Mediterranean tree crowns (5 to 15 m diameter) span only 20 to 60 pixels and frequently merge into continuous canopy in dense stands, eliminating the inter-crown gaps that visual detectors rely on.
-2. **Low spectral contrast.** Evergreen broadleaves (*Quercus ilex*) and conifers (*Pinus halepensis*, *P. sylvestris*) produce similar spectral signatures in RGB imagery during summer, when most aerial surveys are conducted (Guillen-Climent et al., 2012).
+2. **Low spectral contrast.** Evergreen broadleaves (_Quercus ilex_) and conifers (_Pinus halepensis_, _P. sylvestris_) produce similar spectral signatures in RGB imagery during summer, when most aerial surveys are conducted (Guillen-Climent et al., 2012).
 3. **Mixed-age structure.** Uneven-aged Mediterranean stands contain trees from 5 to 30+ m in height. Small understory trees are invisible from above in dense canopy but physically present and detectable by LiDAR (Næsset, 2002).
 
 Classical LiDAR-based ITD via Canopy Height Model (CHM) local-maximum filtering is a well-established technique (Popescu and Wynne, 2004; Hyyppä et al., 2001; Koch et al., 2006), now standard in tools such as the lidR R package (Roussel et al., 2020) and ForestTools. More recently, deep learning approaches based on convolutional and transformer architectures (DeepForest, Weinstein et al., 2019, 2021; DETR-family models) have shown strong results in temperate and boreal forests with distinct crown boundaries.
@@ -36,7 +36,7 @@ Beyond the inventory itself, we document two instructive negative results: an RG
 
 ### 2.1 Study area
 
-Parc Natural del Montseny (41.77°N, 2.43°E) occupies 31,064 ha in the Pre-Coastal Range of Catalunya. Elevation ranges from 200 m (Sant Celoni valley) to 1,706 m (Turó de l'Home), creating a pronounced altitudinal vegetation gradient. Low elevations support open *Pinus halepensis* and *Quercus ilex* stands (50 to 200 trees/ha); mid elevations have mixed forests; high elevations are dominated by *Fagus sylvatica* on north-facing slopes and *Pinus sylvestris* on south-facing slopes (200 to 400 trees/ha) (Gracia et al., 2004; Vayreda et al., 2012).
+Parc Natural del Montseny (41.77°N, 2.43°E) occupies 31,064 ha in the Pre-Coastal Range of Catalunya. Elevation ranges from 200 m (Sant Celoni valley) to 1,706 m (Turó de l'Home), creating a pronounced altitudinal vegetation gradient (Gracia et al., 2004; Vayreda et al., 2012). Low elevations support open _Pinus halepensis_ and _Quercus ilex_ stands (50 to 200 trees/ha), with _Castanea sativa_ forming locally dense stands in the Sant Celoni and Brull sectors. Mid elevations (400 to 900 m) host mixed forests where _Quercus pubescens_ is co-dominant with _Q. ilex_ and _P. sylvestris_, particularly on south-facing aspects. High elevations are dominated by _Fagus sylvatica_ on north-facing slopes and _Pinus sylvestris_ on south-facing slopes (200 to 400 trees/ha). A dense tall-shrub layer of _Buxus sempervirens_ occurs at mid elevations, with individuals occasionally reaching 5 to 6 m; these are structurally indistinguishable from young trees by LiDAR alone and represent a known source of commission error at the 5 m height threshold used in this work.
 
 We sampled 800 patches across 8 zones stratified by elevation and aspect: high, low, mid, ne_slopes, nw_plateau, se_ridge, summit, and sw_valley (Figure 1). Each patch covers 160 m × 160 m (2.56 ha). Of these, 783 were successfully processed; 17 failed due to network errors during LiDAR tile download.
 
@@ -60,7 +60,7 @@ For each patch, a Canopy Height Model (CHM) is rasterized at 0.5 m resolution fr
 - **Digital Surface Model (DSM)**: maximum z per grid cell among first-return points.
 - **CHM = max(DSM − DTM, 0)**.
 
-CHM rasters are cached on disk as single-band float32 GeoTIFFs with DEFLATE compression.
+The minimum-z DTM is a simplification; TIN interpolation (Hyyppä et al., 2001) would produce a smoother ground surface, particularly under dense canopy where ground returns are sparse. This introduces localized CHM elevation errors that propagate to the allometric estimates. CHM rasters are cached on disk as single-band float32 GeoTIFFs with DEFLATE compression.
 
 ### 3.2 Tree-top detection
 
@@ -71,7 +71,7 @@ Individual tree positions are identified by local-maximum filtering on the smoot
 3. Peaks where the smoothed value equals the local maximum AND exceeds 5 m, the tree/shrub threshold used by the Spanish Forest Inventory.
 4. Pixel-to-world projection via the rasterio affine transform.
 
-A 6 m window diameter (3 m radius) was chosen to match the minimum expected crown spacing for the dominant Montseny species, where mature *Quercus ilex* crowns are typically 5 to 12 m in diameter and *Pinus halepensis* 4 to 8 m (Guillen-Climent et al., 2012). Parameters were validated on 100 randomly selected patches: mean density 125 trees/ha, mean peak height 12.2 m, 90% of peaks ≥ 7 m, mean nearest-neighbor distance 6.0 m. All metrics fall within published ranges for Mediterranean mixed forests (Gracia et al., 2004; Vayreda et al., 2012).
+A 6 m window diameter (3 m radius) was chosen to match the minimum expected crown spacing for the dominant Montseny species, where mature _Quercus ilex_ crowns are typically 5 to 12 m in diameter and _Pinus halepensis_ 4 to 8 m (Guillen-Climent et al., 2012). We note that a variable window approach scaling with CHM height (Popescu and Wynne, 2004) has been the field standard for heterogeneous-height stands and would likely improve detection in stands where canopy height ranges from 5 to 30+ m. We adopted a fixed window for implementation simplicity; this is a known limitation that partially explains the 16% fallback rate in the crown segmentation step (Section 3.4). Parameters were validated on 100 randomly selected patches: mean density 125 trees/ha, mean peak height 12.2 m, 90% of peaks ≥ 7 m, mean nearest-neighbor distance 6.0 m. All metrics fall within published ranges for Mediterranean mixed forests (Gracia et al., 2004; Vayreda et al., 2012).
 
 ### 3.3 Detection paradigm comparison
 
@@ -81,14 +81,14 @@ The two paradigms are illustrated in Figure 2.
 
 ![Figure 2: Pipeline comparison. (a) RF-DETR primary with LiDAR filter. (b) Classical LiDAR detection with watershed crowns, species classification, and allometry.](figures/fig2_architecture.png)
 
-**Paradigm A: Visual detector with LiDAR filter.** RF-DETR (DINOv2 backbone, fine-tuned on DeepForest-generated weak labels, Weinstein et al., 2019) detects trees in RGB patches. A deterministic LiDAR filter drops detections whose bbox center has no CHM peak within 2 m. We progressively optimized the inference configuration:
+**Paradigm A: Visual detector with LiDAR filter.** RF-DETR (DINOv2 backbone, fine-tuned on approximately 27,000 DeepForest-generated weak labels across 800 patches, Weinstein et al., 2019) detects trees in RGB patches. A deterministic LiDAR filter drops detections whose bbox center has no CHM peak within 2 m. We progressively optimized the inference configuration:
 
-| Configuration | Predictions | TP | Precision | Recall | F1 |
-|---|---:|---:|---:|---:|---:|
-| Baseline (conf=0.30, no filter) | 840 | 225 | 0.268 | 0.068 | 0.108 |
-| + LiDAR filter | 229 | 225 | 0.983 | 0.068 | 0.127 |
-| + Confidence sweep (conf=0.02) | 700 | 505 | 0.721 | 0.152 | 0.252 |
-| + Sliced inference (9 × 320px) | 2,247 | 1,356 | 0.604 | 0.408 | 0.487 |
+| Configuration                   | Predictions |    TP | Precision | Recall |    F1 |
+| ------------------------------- | ----------: | ----: | --------: | -----: | ----: |
+| Baseline (conf=0.30, no filter) |         840 |   225 |     0.268 |  0.068 | 0.108 |
+| + LiDAR filter                  |         229 |   225 |     0.983 |  0.068 | 0.127 |
+| + Confidence sweep (conf=0.02)  |         700 |   505 |     0.721 |  0.152 | 0.252 |
+| + Sliced inference (9 × 320px)  |       2,247 | 1,356 |     0.604 |  0.408 | 0.487 |
 
 The confidence sweep, which lowers the detector's threshold from 0.30 to 0.02 and reapplies the filter, produced a 2.3× F1 improvement with zero retraining. Sliced inference, which runs the detector on 9 overlapping 320 × 320 sub-windows per patch and merges via NMS, added a further 1.9× by allowing each sub-window its own 300-query budget, effectively improving the resolution at which the detector sees each crown. The F1 progression across successive optimizations is shown in Figure 3.
 
@@ -108,7 +108,7 @@ Per-tree crown shapes are delineated via marker-controlled watershed segmentatio
 4. **Post-masking**: pixels below 5 m removed from all basins.
 5. **Polygon extraction** via `rasterio.features.shapes`.
 
-Basins exceeding 150 m² (roughly 14 m diameter) are replaced with circular fallback polygons of 2.5 m radius. This threshold corresponds to the upper end of crown diameters for Montseny species, including mature *Fagus sylvatica* which can reach 12 to 16 m (Gracia et al., 2004). On the reference set, 16% of trees received fallback polygons. Median crown area: 13 m²; mean: 20 m².
+Basins exceeding 150 m² (roughly 14 m diameter) are replaced with circular fallback polygons of 2.5 m radius. This threshold corresponds to the upper end of crown diameters for Montseny species, including mature _Fagus sylvatica_ which can reach 12 to 16 m (Gracia et al., 2004). On the reference set, 16% of trees received fallback polygons. Median crown area: 13 m²; mean: 20 m².
 
 ### 3.5 Species classification
 
@@ -117,7 +117,7 @@ Binary broadleaf/conifer classification uses an unsupervised percentile-threshol
 - **Return ratio**: fraction of multi-return pulses. Broadleaves have sparser canopy where pulses penetrate multiple layers, producing more multi-returns; conifers absorb most energy on first return due to denser needle foliage.
 - **Intensity mean**: laser return amplitude at 1064 nm. Broadleaf leaves are more reflective than conifer needles at this wavelength.
 
-Both features are z-score normalized across the full inventory batch. A composite score (sum of z-scores) is thresholded at the 40th percentile, labeling the top 60% as broadleaf. The 60% target is calibrated to the Catalan Forest Inventory (IEFC) published broadleaf fraction for Montseny (Gracia et al., 2004). Because this global fraction is set by construction, it cannot serve as validation. Instead, we validate via the per-zone gradient (Section 4.2) and an independent crown-area analysis, neither of which is constrained by the threshold choice.
+Both features are z-score normalized across the full inventory batch. A composite score (sum of z-scores) is thresholded at the 40th percentile, labeling the top 60% as broadleaf. The 60% target is informed by the Catalan Forest Inventory (IEFC) broadleaf fraction for Montseny (Gracia et al., 2004), though we note a methodological mismatch: the IEFC fraction is computed from canopy-dominant stems (typically DBH ≥ 7.5 cm), while our inventory includes all stems above 5 m height. Including conifer regeneration (particularly _P. sylvestris_ and _P. halepensis_ thickets at lower elevations) may shift the true stem-count broadleaf fraction below 60%. Because this global fraction is set by construction, it cannot serve as validation regardless. Instead, we validate via the per-zone gradient (Section 4.2) and an independent crown-area analysis, neither of which is constrained by the threshold choice.
 
 ### 3.6 Allometric estimation
 
@@ -129,12 +129,12 @@ DBH (cm) = a × (crown_area × height)^b
 **DBH-to-biomass** (Ruiz-Peinado et al., 2011, 2012, Mediterranean species):
 AGB (kg) = c × DBH^d
 
-| Species group | a | b | c | d |
-|---|---:|---:|---:|---:|
-| Broadleaf | 0.56 | 0.63 | 0.22 | 2.36 |
-| Conifer | 0.48 | 0.65 | 0.085 | 2.49 |
+| Species group      |    a |    b |     c |    d | Representative species             |
+| ------------------ | ---: | ---: | ----: | ---: | ---------------------------------- |
+| Broadleaf (pooled) | 0.56 | 0.63 |  0.22 | 2.36 | _Q. ilex_ + _F. sylvatica_ average |
+| Conifer            | 0.48 | 0.65 | 0.085 | 2.49 | _P. halepensis_ / _P. sylvestris_  |
 
-Coefficients are representative values derived from the European temperate calibration in Jucker et al. (2017) and the Mediterranean species equations in Ruiz-Peinado et al. (2011, 2012), following the general allometric framework reviewed by Chave et al. (2014). They are not site-calibrated to Montseny. Per-tree confidence intervals are fixed at ±30% for DBH and ±40% for biomass, following the reported RMSE ranges in Jucker et al. (2017, Table S2) and Ruiz-Peinado et al. (2011, Table 3). Stand-level aggregates converge to approximately ±10 to 15% as individual errors average out (Breidenbach and Astrup, 2012; Forrester et al., 2017).
+Coefficients are representative values derived from the European temperate calibration in Jucker et al. (2017) and the Mediterranean species equations in Ruiz-Peinado et al. (2011, 2012), following the general allometric framework reviewed by Chave et al. (2014). They are not site-calibrated to Montseny. The pooled broadleaf row is a simplification: Ruiz-Peinado provides separate equations for _Q. ilex_ (c = 0.135, d = 2.43) and _F. sylvatica_ (c = 0.0778, d = 2.61), which differ meaningfully in the intercept. Collapsing them into a single broadleaf row introduces systematic zone-level bias because the two species dominate different elevation bands. Disaggregating by dominant broadleaf species would improve accuracy, but requires genus-level species labels not yet available in this pipeline. Per-tree confidence intervals are fixed at ±40% for DBH and ±45% for biomass, following the reported RMSE ranges in Jucker et al. (2017, Table S2), which reports 25 to 45% per-tree error for Mediterranean mixed forests. Stand-level aggregates converge to approximately ±10 to 15% under the assumption of uncorrelated errors (Breidenbach and Astrup, 2012; Forrester et al., 2017), though real allometric errors are partially correlated within locally dominant species, making this a lower bound.
 
 ### 3.7 Health scoring
 
@@ -148,25 +148,25 @@ The LiDAR-based pipeline processed 783 of 800 patches (2,004 ha), detecting 228,
 
 **Table 1.** Per-zone inventory summary.
 
-| Zone | Trees | Broadleaf % | AGB (t/ha) | Stressed % |
-|---|---:|---:|---:|---:|
-| high | 28,498 | 53.6 | 36.8 | 4.8 |
-| low | 29,358 | 74.9 | 41.1 | 20.6 |
-| mid | 33,809 | 54.6 | 52.4 | 1.6 |
-| ne_slopes | 32,248 | 88.9 | 48.4 | 10.3 |
-| nw_plateau | 25,184 | 63.6 | 74.8 | 23.4 |
-| se_ridge | 27,840 | 46.0 | 45.6 | 32.1 |
-| summit | 28,283 | 63.3 | 38.7 | 6.2 |
-| sw_valley | 23,455 | 25.9 | 45.0 | 20.4 |
-| **Total** | **228,675** | **60.0** | **48.0** | **14.3** |
+| Zone       |       Trees | Broadleaf % | AGB (t/ha) | Stressed % |
+| ---------- | ----------: | ----------: | ---------: | ---------: |
+| high       |      28,498 |        53.6 |       36.8 |        4.8 |
+| low        |      29,358 |        74.9 |       41.1 |       20.6 |
+| mid        |      33,809 |        54.6 |       52.4 |        1.6 |
+| ne_slopes  |      32,248 |        88.9 |       48.4 |       10.3 |
+| nw_plateau |      25,184 |        63.6 |       74.8 |       23.4 |
+| se_ridge   |      27,840 |        46.0 |       45.6 |       32.1 |
+| summit     |      28,283 |        63.3 |       38.7 |        6.2 |
+| sw_valley  |      23,455 |        25.9 |       45.0 |       20.4 |
+| **Total**  | **228,675** |    **60.0** |   **48.0** |   **14.3** |
 
-Park-wide AGB of 48.0 t/ha falls slightly below the 50 to 90 t/ha range reported by Vayreda et al. (2012) for Catalan forests and the 40 to 150 t/ha reported across Spanish Mediterranean forests by Moreno-Fernandez et al. (2018). This is expected because our inventory includes all trees ≥ 5 m, including small understory individuals that contribute minimally to biomass but substantially dilute the per-hectare average. In our data, 50% of trees have DBH < 15 cm and contribute only 3.2% of total AGB, consistent with the 5 to 15% reported by Montero et al. (2005) for Mediterranean stands. Per-zone species fractions and biomass densities are shown in Figure 4.
+Park-wide AGB of 48.0 t/ha falls slightly below the 50 to 90 t/ha range reported by Vayreda et al. (2012) for Catalan forests and the 40 to 150 t/ha reported across Spanish Mediterranean forests by Moreno-Fernandez et al. (2018). This is expected because our inventory includes all trees ≥ 5 m, including small understory individuals that contribute minimally to biomass but substantially dilute the per-hectare average. In our data, 50% of trees have DBH < 15 cm and contribute only 3.2% of total AGB, consistent with the 5 to 15% reported by Montero et al. (2005) for Mediterranean stands. The highest per-zone value (nw_plateau, 74.8 t/ha) approaches the IEFC range for mature broadleaf stands, though direct comparison requires caution because the IEFC range (80 to 180 t/ha, Gracia et al., 2004) refers to canopy-dominant stems only. We note that the se_ridge zone shows the highest stress rate (32.1%), which may be partially confounded by bare rock and mineral substrate exposure on south-east facing ridge terrain; at 25 cm/px, bounding-box crops for trees on rocky terrain include non-vegetated pixels that depress GRVI independently of actual tree vitality. Per-zone species fractions and biomass densities are shown in Figure 4.
 
 ![Figure 4: Per-zone species composition (a) and biomass density (b) across the 8 Montseny sampling zones.](figures/fig4_zone_species_biomass.png)
 
 ### 4.2 Species classification validation
 
-The park-wide broadleaf fraction of 60.0% is set by the percentile threshold (Section 3.5) and does not constitute independent validation. However, the per-zone variation, which is not constrained by the threshold, provides meaningful ecological evidence. Per-zone broadleaf fractions range from 25.9% (sw_valley) to 88.9% (ne_slopes), reproducing the expected altitudinal and aspect gradient: north-facing moist slopes are broadleaf-dominated (*Fagus*, *Quercus*), while south-facing dry ridges and valleys are conifer-dominated (*Pinus halepensis*). This pattern is consistent with the species distributions documented by Gracia et al. (2004) for Montseny.
+The park-wide broadleaf fraction of 60.0% is set by the percentile threshold (Section 3.5) and does not constitute independent validation. However, the per-zone variation, which is not constrained by the threshold, provides meaningful ecological evidence. Per-zone broadleaf fractions range from 25.9% (sw_valley) to 88.9% (ne_slopes), reproducing the expected altitudinal and aspect gradient: north-facing moist slopes are broadleaf-dominated (_Fagus_, _Quercus_), while south-facing dry ridges and valleys are conifer-dominated (_Pinus halepensis_). This pattern is consistent with the species distributions documented by Gracia et al. (2004) for Montseny.
 
 An independent physical signal further supports the classification: trees classified as broadleaf have significantly larger mean crown area (24.6 m²) than those classified as conifer (13.0 m²), consistent with the known horizontal spreading of broadleaf canopies versus the narrow conical form of Mediterranean pines. Crown area was not an input to the classifier, making this a genuinely independent cross-check. Example crown polygons from three representative zones are shown in Figure 5.
 
@@ -215,7 +215,7 @@ This finding suggests a general diagnostic for practitioners: before investing i
 1. **Evaluation circularity.** The LiDAR-based detector produces outputs identical to the LiDAR-derived reference set, making F1 evaluation uninformative for Paradigm B. We mitigate this through ecological plausibility checks and cross-paradigm consistency analysis, but independent field validation (e.g., manual crown delineation from high-resolution orthophotos, or comparison against National Forest Inventory plots) would provide stronger evidence. This is a priority for future work.
 2. **Health labels** are relative indicators based on RGB GRVI, not calibrated against field-measured tree vitality. The 14.3% park-wide stress rate and per-zone gradient are ecologically plausible but should be treated as a proxy for within-park comparison, not an absolute diagnosis.
 3. **Species classification** is binary (broadleaf/conifer), sufficient for allometric differentiation but not for per-species management. Genus-level classification would require hand-labeled training examples or multispectral/hyperspectral imagery.
-4. **Allometric coefficients** are representative Mediterranean averages, not site-calibrated to Montseny. Per-tree DBH accuracy is ±30%; stand-level accuracy is ±10 to 15% (Breidenbach and Astrup, 2012). Ground-truth calibration on measured trees would improve accuracy.
+4. **Allometric coefficients** are representative Mediterranean averages, not site-calibrated to Montseny. Per-tree DBH accuracy is ±40%; stand-level accuracy is approximately ±10 to 15% assuming error independence (Breidenbach and Astrup, 2012), though real allometric errors are partially correlated within locally dominant species. Ground-truth calibration on measured trees would improve accuracy, and disaggregating the broadleaf coefficients by dominant species (*Q. ilex* vs. *F. sylvatica*) would reduce the largest identifiable systematic bias.
 5. **Crown polygon quality.** Watershed segmentation produces fallback circular polygons for 16% of trees where basins are empty or over-segmented. Point-prompted segmentation models such as SAM 2 (Ravi et al., 2024) could improve polygon quality for these cases, particularly in dense canopy where watershed basins are most prone to over-segmentation.
 6. **Temporal mismatch** between LiDAR (2021 to 2023) and orthophotos introduces potential inconsistencies for recently disturbed stands. For the mature forests of Montseny, this effect is minor at the 5 m height threshold.
 7. **External benchmark.** We compared detection paradigms within our pipeline but did not benchmark against established external ITD implementations (lidR, DeepForest, ForestTools). Future work should include such comparisons on the same reference set to establish broader generalizability.
