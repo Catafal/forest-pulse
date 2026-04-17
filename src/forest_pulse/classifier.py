@@ -1,4 +1,21 @@
-"""Post-detector tree classifier — RGB-distilled LiDAR knowledge.
+"""LEGACY — Post-detector tree classifier (Phase 9/9.5b).
+
+NOT USED IN PRODUCTION. The production pipeline uses:
+  - forest_pulse.species.classify_broadleaf_conifer (Phase 12a)
+    for species classification
+  - forest_pulse.detect.detect_trees_from_lidar (Phase 11a)
+    for detection
+
+This module is retained because:
+  1. tests/test_classifier.py exercises it (31 tests)
+  2. scripts/_archive/train_classifier.py references it
+  3. It documents the Phase 9.5b negative result (RGB distillation
+     refuted — see .claude/runs/lidar-distilled-rgb-classifier/RESULTS.md)
+
+Original docstring follows.
+------------------------------------------------------------
+
+Post-detector tree classifier — RGB-distilled LiDAR knowledge.
 
 Takes any RF-DETR detection plus its 2D context (bbox geometry +
 GRVI/ExG vegetation indices + RGB color statistics from the bbox crop)
