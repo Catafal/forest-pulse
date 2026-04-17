@@ -24,22 +24,17 @@ Eval:   10-patch reference set; 3320 trees, each with:
         Runtime: 266s for 10 patches (Phase 12b adds negligible
         overhead on top of 12a; bottleneck is still extract_lidar_features).
         Full park run ~6 hours (spatial-index optimization deferred).
-Next:   3-WEEK SPRINT COMPLETE. Forest Pulse is now a parameterized
-        Mediterranean forest inventory system. Remaining ROADMAP items
-        are OPTIONAL enhancements, not core functionality:
-          Phase 11c (opt) — SAM2 point-prompted crown refinement
-          Phase 12c (opt) — Full species classifier with hand-labels
-                            (would replace 12a binary with 5-10 class
-                             genus labels, enabling per-species DBH)
-          Phase 13 (opt)  — Drone imagery acquisition for higher F1
-        Performance follow-up: optimize extract_lidar_features with a
-        spatial index (KD-tree or voxel grid) to cut per-patch runtime
-        from 26.6s → ~0.3s. Would restore Phase 11b's 2-minute
-        full-park-run envelope. Pure perf optimization, not
-        correctness.
-        Phase 14 candidate: temporal change detection via
-        forest_pulse.temporal (already exists from Phase 5) diffing
-        two inventory runs to find new/lost/stressed trees.
+Next:   STOP BUILDING FEATURES. START WRITING.
+        See .claude/NEXT_STEPS.md for the full post-sprint plan.
+        Summary:
+          Phase A (1 week)   — Codebase cleanup + README + METHODOLOGY.md + v1.0.0 tag
+          Phase B (1-2 weeks) — Paper / preprint (EarthArXiv or Remote Sensing)
+          Phase C (1 week)   — Carbon accounting in a SEPARATE repo
+        Decision rationale: diminishing returns on features, compounding
+        returns on documentation. The methodology (LiDAR-first flip,
+        confidence sweep, unsupervised species) is more novel than any
+        remaining feature work. Carbon accounting is a different domain
+        that belongs in its own repo consuming the GeoJSON.
 
 ## Completed
 
