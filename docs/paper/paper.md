@@ -38,7 +38,9 @@ Beyond the inventory itself, we document the complete methodological evolution f
 
 Parc Natural del Montseny (41.77 N, 2.43 E) occupies 31,064 ha in the Pre-Coastal Range of Catalunya. Elevation ranges from 200 m (Sant Celoni valley) to 1,706 m (Turo de l'Home), creating a pronounced altitudinal vegetation gradient. Low elevations support open Pinus halepensis and Quercus ilex stands (50-200 trees/ha); mid elevations have mixed forests; high elevations are dominated by Fagus sylvatica on north-facing slopes and Pinus sylvestris on south-facing slopes (200-400 trees/ha).
 
-We sampled 800 patches across 8 zones stratified by elevation and aspect: `high`, `low`, `mid`, `ne_slopes`, `nw_plateau`, `se_ridge`, `summit`, `sw_valley`. Each patch covers 160 m x 160 m (2.56 ha). Of these, 783 were successfully processed; 17 failed due to network errors during LiDAR tile download.
+We sampled 800 patches across 8 zones stratified by elevation and aspect: `high`, `low`, `mid`, `ne_slopes`, `nw_plateau`, `se_ridge`, `summit`, `sw_valley` (Figure 1). Each patch covers 160 m x 160 m (2.56 ha). Of these, 783 were successfully processed; 17 failed due to network errors during LiDAR tile download.
+
+![Figure 1: Study area. 800 patches across 8 Montseny zones, with inset showing location in NE Iberian Peninsula.](figures/fig1_study_area.png)
 
 ### 2.2 Orthophotos
 
@@ -86,7 +88,13 @@ We evaluated three detection architectures on a fixed 10-patch reference set (3,
 
 The confidence sweep — lowering the detector's threshold from 0.30 to 0.02 and reapplying the filter — produced a 2.34x F1 improvement with zero retraining. Sliced inference (running the detector on 9 overlapping 320 x 320 sub-windows per patch and merging via NMS) added 1.93x by allowing each sub-window its own 300-query budget, effectively improving the resolution at which the detector sees each crown.
 
-**Architecture B: LiDAR-first (production).** LiDAR tree-tops are the detector; each peak becomes one detection with a fixed 2.5 m radius bbox. On the same reference set: 3,320 detections matching all 3,320 ground-truth peaks by construction. Runtime: 0.2 s total (vs. 8.1 s for Architecture A's best configuration).
+**Architecture B: LiDAR-first (production).** LiDAR tree-tops are the detector; each peak becomes one detection with a fixed 2.5 m radius bbox (Figure 2). On the same reference set: 3,320 detections matching all 3,320 ground-truth peaks by construction. Runtime: 0.2 s total (vs. 8.1 s for Architecture A's best configuration).
+
+![Figure 2: Architecture comparison. (a) RF-DETR primary with LiDAR filter. (b) LiDAR-first with watershed crowns, species, and allometry.](figures/fig2_architecture.png)
+
+The F1 progression across successive inference-time optimizations is shown in Figure 3.
+
+![Figure 3: Detection performance evolution across four RF-DETR operating points on the 10-patch reference set.](figures/fig3_f1_progression.png)
 
 The F1 metric is structurally uninformative under Architecture B (detections ARE the ground truth), so we validate via ecological plausibility (Section 4.1) and cross-architecture consistency (Section 4.2) instead.
 
@@ -154,13 +162,17 @@ The LiDAR-first pipeline processed 783 of 800 patches (2,004 ha), detecting 228,
 | sw_valley | 23,455 | 25.9 | 45.0 | 20.4 |
 | **Total** | **228,675** | **60.0** | **48.0** | **14.3** |
 
-Park-wide AGB of 48.0 t/ha is consistent with the 50-90 t/ha range reported by Vayreda et al. (2012) for Catalan forests, accounting for the inclusion of all trees >= 5 m (not just canopy-dominant individuals as in field-based inventories).
+Park-wide AGB of 48.0 t/ha is consistent with the 50-90 t/ha range reported by Vayreda et al. (2012) for Catalan forests, accounting for the inclusion of all trees >= 5 m (not just canopy-dominant individuals as in field-based inventories). Per-zone species fractions and biomass densities are shown in Figure 4.
+
+![Figure 4: Per-zone species composition (a) and biomass density (b) across the 8 Montseny sampling zones.](figures/fig4_zone_species_biomass.png)
 
 ### 4.2 Species classification validation
 
 Per-zone broadleaf fractions reproduce the expected ecological gradient: north-facing moist slopes (ne_slopes, 88.9%) and low-elevation broadleaf zones (low, 74.9%) are broadleaf-dominated; south-facing dry ridges (se_ridge, 46.0%) and Pinus halepensis valleys (sw_valley, 25.9%) are conifer-dominated.
 
-An independent physical validation supports the classification: trees classified as broadleaf have significantly larger mean crown area (24.6 m2) than those classified as conifer (13.0 m2), consistent with the known horizontal spreading of broadleaf canopies versus the narrow conical form of Mediterranean pines. Crown area was not an input to the classifier.
+An independent physical validation supports the classification: trees classified as broadleaf have significantly larger mean crown area (24.6 m2) than those classified as conifer (13.0 m2), consistent with the known horizontal spreading of broadleaf canopies versus the narrow conical form of Mediterranean pines. Crown area was not an input to the classifier. Example crown polygons from three representative zones are shown in Figure 5.
+
+![Figure 5: Crown polygon examples overlaid on RGB orthophotos for three representative zones: dense broadleaf (nw_plateau), mixed (mid), and sparse conifer (sw_valley).](figures/fig5_crown_examples.png)
 
 ### 4.3 Cross-architecture consistency
 
@@ -168,7 +180,9 @@ On the 10-patch reference set, the LiDAR-first architecture (3,320 trees) detect
 
 ### 4.4 DBH and biomass distributions
 
-Median DBH: 14.9 cm (broadleaf 15.8, conifer 13.3). The J-shaped diameter distribution is characteristic of uneven-aged Mediterranean forests: 50% of trees have DBH < 15 cm but contribute only 3.2% of total biomass. The 80+ cm class (1.4% of trees) contributes 25.6% of biomass, reflecting the nonlinear DBH-biomass relationship (AGB proportional to DBH^2.4).
+Median DBH: 14.9 cm (broadleaf 15.8, conifer 13.3). The J-shaped diameter distribution (Figure 6) is characteristic of uneven-aged Mediterranean forests: 50% of trees have DBH < 15 cm but contribute only 3.2% of total biomass. The 80+ cm class (1.4% of trees) contributes 25.6% of biomass, reflecting the nonlinear DBH-biomass relationship (AGB proportional to DBH^2.4).
+
+![Figure 6: DBH distribution by species group across 228,675 trees. Dashed lines indicate medians.](figures/fig6_dbh_distribution.png)
 
 Per-zone AGB ranges from 36.8 t/ha (high, open altitude) to 74.8 t/ha (nw_plateau, dense broadleaf). The nw_plateau value is within the 80-180 t/ha range reported by the IEFC for mature Montseny stands.
 
@@ -186,7 +200,9 @@ The LiDAR-first approach is not universally superior. It requires dense airborne
 
 The single largest F1 improvement in this work (0.108 to 0.252, a 2.34x lift) came from lowering the RF-DETR confidence threshold from 0.30 to 0.02 — a one-parameter change requiring zero retraining. The detector had been discarding 60% of its true positive candidates at the Phase 1 default threshold. This was invisible until we combined the sweep with a high-precision LiDAR filter that could clean up the additional false positives.
 
-This suggests a general diagnostic: before investing in model retraining or feature engineering, sweep inference-time hyperparameters against an independent ground truth. Default thresholds from early development may impose invisible ceilings on downstream metrics.
+This suggests a general diagnostic: before investing in model retraining or feature engineering, sweep inference-time hyperparameters against an independent ground truth. Default thresholds from early development may impose invisible ceilings on downstream metrics. The full confidence sweep curve (Figure 7) shows the interaction between confidence threshold and LiDAR filtering across six threshold values.
+
+![Figure 7: Confidence sweep showing F1 vs. threshold for raw (unfiltered) and LiDAR-filtered detection. The 2.34x lift from the sweep is annotated.](figures/fig7_confidence_sweep.png)
 
 ### 5.3 Negative results
 
