@@ -25,15 +25,8 @@ env/
 data/*
 !data/.gitkeep
 !data/montseny/
-data/montseny/raw/               # raw ICGC GeoTIFFs (1.3GB, git-ignored)
-data/montseny/rasters/           # cached NDVI + CHM rasters (per-patch)
-data/montseny/lidar/             # cached ICGC LAZ tiles (~400-700 MB each)
-data/montseny/patches/           # ignoring images/patches
-data/montseny/boundary.geojson   # not yet created
+data/montseny/*
 !data/montseny/patches_metadata.csv
-data/montseny/annotations_raw.json   # large (~50 MB), should not be in git
-data/montseny/annotations_round_*.json  # training round annotations
-data/montseny/eval_gold/             # gold evaluation set
 
 # Outputs (generated results — never commit)
 outputs/*
