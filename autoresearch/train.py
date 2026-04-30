@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 BACKBONE = "rfdetr-base"          # rfdetr-base | rfdetr-large
 LEARNING_RATE = 1e-4              # float, typically 1e-3 to 1e-6
-BATCH_SIZE = 2                    # int, keep low for MPS (2-4)
+BATCH_SIZE = 4                    # int, 4 works on 48GB MPS (2 for 24GB)
 FINE_TUNE_EPOCHS = 10             # int, 10 epochs for first real training
 
 # ============================================================
